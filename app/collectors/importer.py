@@ -113,40 +113,50 @@ def get_or_create_api_limit(
 
 def import_normalized_records(db: Session, records: list[CollectorNormalizedRecord | dict]) -> int:
     saved = 0
-    for raw_record in records:
-        record = validate_normalized_record(raw_record)
-        recorded_at = parse_recorded_at(record.recorded_at)
-        import_key = build_import_key(record)
-        existing = db.scalar(select(models.CollectorImport).where(models.CollectorImport.import_key == import_key))
-        if existing is not None:
-            continue
-
-        service = get_or_create_api_service(db, record)
-        limit = get_or_create_api_limit(db, service, record)
-        note_parts = [f"Imported from {record.vendor} collector."]
-        for key in ("project_id", "organization_id", "workspace_id"):
-            value = getattr(record, key)
-            if value:
-                note_parts.append(f"{key}={value}")
-        usage_record = models.UsageRecord(
-            limit_id=limit.id,
-            used_value=record.used_value,
-            recorded_at=recorded_at,
-            source_type=record.source_type,
-            note=" ".join(note_parts),
-        )
-        limit.updated_at = now_local()
-        db.add(usage_record)
-        db.flush()
-        db.add(
-            models.CollectorImport(
-                import_key=import_key,
-                vendor=record.vendor,
-                source_type=record.source_type,
-                usage_record_id=usage_record.id,
-                created_at=now_local(),
+    try:
+        for raw_record in records:
+            record = validate_normalized_record(raw_record)
+            recorded_at = parse_recorded_at(record.recorded_at)
+            import_key = build_import_key(record)
+            existing = db.scalar(
+                select(models.CollectorImport).where(models.CollectorImport.import_key == import_key)
             )
-        )
-        saved += 1
-    db.commit()
+            if existing is not None:
+                continue
+
+            service = get_or_create_api_service(db, record)
+            limit = get_or_create_api_limit(db, service, record)
+            note_parts = [f"Imported from {record.vendor} collector."]
+            for key in ("project_id", "organization_id", "workspace_id"):
+                value = getattr(record, key)
+                if value:
+                    note_parts.append(f"{key}={value}")
+            usage_record = models.UsageRecord(
+                limit_id=limit.id,
+                used_value=record.used_value,
+                recorded_at=recorded_at,
+                source_type=record.source_type,
+                note=" ".join(note_parts),
+            )
+            limit.updated_at = now_local()
+            db.add(usage_record)
+            db.flush()
+            db.add(
+                models.CollectorImport(
+                    import_key=import_key,
+                    vendor=record.vendor,
+                    source_type=record.source_type,
+                    usage_record_id=usage_record.id,
+                    created_at=now_local(),
+                )
+            )
+            saved += 1
+        db.commit()
+    except CollectorImportError:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise CollectorImportError(str(exc)) from exc
+
     return saved
