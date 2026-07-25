@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import func, select
 
-from app import models
+from app import crud, models
 from app.collectors.importer import CollectorImportError, import_normalized_records
 from tests.helpers import make_session
 
@@ -77,3 +77,71 @@ def test_import_rejects_invalid_recorded_at_without_saving() -> None:
         usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
 
     assert usage_count == 0
+
+
+def test_import_rolls_back_earlier_records_when_later_record_fails() -> None:
+    with next(make_session()) as db:
+        records = [normalized_record(), normalized_record("not-a-date")]
+        with pytest.raises(CollectorImportError):
+            import_normalized_records(db, records)
+
+        service_count = db.scalar(select(func.count(models.Service.id)))
+        limit_count = db.scalar(select(func.count(models.Limit.id)))
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+        import_count = db.scalar(select(func.count(models.CollectorImport.id)))
+
+    assert service_count == 0
+    assert limit_count == 0
+    assert usage_count == 0
+    assert import_count == 0
+
+
+def test_import_wraps_unexpected_error_and_rolls_back() -> None:
+    with next(make_session()) as db:
+        records = [normalized_record(), normalized_record() | {"model_name": ""}]
+        with pytest.raises(CollectorImportError):
+            import_normalized_records(db, records)
+
+        service_count = db.scalar(select(func.count(models.Service.id)))
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+
+    assert service_count == 0
+    assert usage_count == 0
+
+
+def test_session_is_reusable_after_rollback() -> None:
+    with next(make_session()) as db:
+        with pytest.raises(CollectorImportError):
+            import_normalized_records(db, [normalized_record("not-a-date")])
+
+        saved = import_normalized_records(db, [normalized_record()])
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+
+    assert saved == 1
+    assert usage_count == 1
+
+
+def test_failed_collector_run_recorded_without_partial_import_data() -> None:
+    with next(make_session()) as db:
+        run = crud.create_collector_run(db, "openai", dry_run=False)
+
+        records = [normalized_record(), normalized_record("not-a-date")]
+        try:
+            import_normalized_records(db, records)
+        except CollectorImportError as exc:
+            crud.finish_collector_run_failed(db, run.id, str(exc))
+
+        run_count = db.scalar(select(func.count(models.CollectorRun.id)))
+        failed_run = db.scalar(select(models.CollectorRun).where(models.CollectorRun.id == run.id))
+        service_count = db.scalar(select(func.count(models.Service.id)))
+        limit_count = db.scalar(select(func.count(models.Limit.id)))
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+        import_count = db.scalar(select(func.count(models.CollectorImport.id)))
+
+    assert run_count == 1
+    assert failed_run is not None
+    assert failed_run.status == "failed"
+    assert service_count == 0
+    assert limit_count == 0
+    assert usage_count == 0
+    assert import_count == 0
