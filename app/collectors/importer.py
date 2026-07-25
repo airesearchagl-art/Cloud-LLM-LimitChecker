@@ -151,6 +151,7 @@ def import_normalized_records(db: Session, records: list[CollectorNormalizedReco
                 )
             )
             saved += 1
+        db.commit()
     except CollectorImportError:
         db.rollback()
         raise
@@ -158,5 +159,4 @@ def import_normalized_records(db: Session, records: list[CollectorNormalizedReco
         db.rollback()
         raise CollectorImportError(str(exc)) from exc
 
-    db.commit()
     return saved

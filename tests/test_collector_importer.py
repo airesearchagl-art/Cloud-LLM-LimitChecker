@@ -145,3 +145,85 @@ def test_failed_collector_run_recorded_without_partial_import_data() -> None:
     assert limit_count == 0
     assert usage_count == 0
     assert import_count == 0
+
+
+def test_import_rolls_back_when_commit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    with next(make_session()) as db:
+        original_commit = db.commit
+        calls = {"count": 0}
+
+        def failing_commit() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("commit failed")
+            original_commit()
+
+        monkeypatch.setattr(db, "commit", failing_commit)
+
+        with pytest.raises(CollectorImportError):
+            import_normalized_records(db, [normalized_record()])
+
+        service_count = db.scalar(select(func.count(models.Service.id)))
+        limit_count = db.scalar(select(func.count(models.Limit.id)))
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+        import_count = db.scalar(select(func.count(models.CollectorImport.id)))
+
+    assert service_count == 0
+    assert limit_count == 0
+    assert usage_count == 0
+    assert import_count == 0
+
+
+def test_session_is_reusable_after_commit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    with next(make_session()) as db:
+        original_commit = db.commit
+        calls = {"count": 0}
+
+        def failing_commit() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("commit failed")
+            original_commit()
+
+        monkeypatch.setattr(db, "commit", failing_commit)
+
+        with pytest.raises(CollectorImportError):
+            import_normalized_records(db, [normalized_record()])
+
+        saved = import_normalized_records(db, [normalized_record()])
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+
+    assert saved == 1
+    assert usage_count == 1
+
+
+def test_failed_collector_run_recorded_after_commit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    with next(make_session()) as db:
+        run = crud.create_collector_run(db, "openai", dry_run=False)
+
+        original_commit = db.commit
+        calls = {"count": 0}
+
+        def failing_commit() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("commit failed")
+            original_commit()
+
+        monkeypatch.setattr(db, "commit", failing_commit)
+
+        try:
+            import_normalized_records(db, [normalized_record()])
+        except CollectorImportError as exc:
+            crud.finish_collector_run_failed(db, run.id, str(exc))
+
+        run_count = db.scalar(select(func.count(models.CollectorRun.id)))
+        failed_run = db.scalar(select(models.CollectorRun).where(models.CollectorRun.id == run.id))
+        service_count = db.scalar(select(func.count(models.Service.id)))
+        usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
+
+    assert run_count == 1
+    assert failed_run is not None
+    assert failed_run.status == "failed"
+    assert service_count == 0
+    assert usage_count == 0
