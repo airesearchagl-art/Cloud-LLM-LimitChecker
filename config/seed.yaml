@@ -1,0 +1,71 @@
+services:
+  - name: ChatGPT
+    provider: OpenAI
+    plan_name: Please enter your actual ChatGPT plan manually
+    account_type: web_subscription
+    limits:
+      - model_name: manual_model_name
+        limit_type: messages
+        max_value: null
+        unit: messages
+        reset_interval_type: manual
+        reset_interval_value: 1
+        next_reset_at: null
+        warning_threshold: 70
+        critical_threshold: 85
+        source_type: manual_required
+      - model_name: manual_image_feature
+        limit_type: images
+        max_value: null
+        unit: images
+        reset_interval_type: manual
+        reset_interval_value: 1
+        next_reset_at: null
+        warning_threshold: 70
+        critical_threshold: 85
+        source_type: manual_required
+  - name: OpenAI API
+    provider: OpenAI
+    plan_name: Please enter your API budget manually
+    account_type: api
+    limits:
+      - model_name: manual_api_project
+        limit_type: api_cost
+        max_value: null
+        unit: usd
+        reset_interval_type: months
+        reset_interval_value: 1
+        next_reset_at: null
+        warning_threshold: 70
+        critical_threshold: 85
+        source_type: manual_required
+  - name: Gemini
+    provider: Google
+    plan_name: Please enter your Gemini plan manually
+    account_type: web_subscription
+    limits:
+      - model_name: manual_model_name
+        limit_type: messages
+        max_value: null
+        unit: messages
+        reset_interval_type: manual
+        reset_interval_value: 1
+        next_reset_at: null
+        warning_threshold: 70
+        critical_threshold: 85
+        source_type: manual_required
+  - name: Claude
+    provider: Anthropic
+    plan_name: Please enter your Claude plan manually
+    account_type: web_subscription
+    limits:
+      - model_name: manual_model_name
+        limit_type: messages
+        max_value: null
+        unit: messages
+        reset_interval_type: manual
+        reset_interval_value: 1
+        next_reset_at: null
+        warning_threshold: 70
+        critical_threshold: 85
+        source_type: manual_required

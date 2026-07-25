@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cloud LLM Limit Checker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Cloud LLM Limit Checker</h1>
+        <p>Web版サブスクリプションとAPI利用状況をローカルで確認します。</p>
+      </div>
+      <div class="actions">
+        <button id="exportJson" type="button">JSON Export</button>
+        <button id="exportCsv" type="button">limits CSV Export</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="toolbar" aria-label="ダッシュボードフィルター">
+        <label>
+          <span>サービス名</span>
+          <input id="filterService" type="search" placeholder="ChatGPT / Gemini / Claude" />
+        </label>
+        <label>
+          <span>account_type</span>
+          <select id="filterAccountType">
+            <option value="">すべて</option>
+            <option value="web_subscription">web_subscription</option>
+            <option value="api">api</option>
+          </select>
+        </label>
+        <label>
+          <span>status</span>
+          <select id="filterStatus">
+            <option value="">すべて</option>
+            <option value="正常">正常</option>
+            <option value="注意">注意</option>
+            <option value="危険">危険</option>
+            <option value="上限到達">上限到達</option>
+            <option value="手入力待ち">手入力待ち</option>
+          </select>
+        </label>
+        <label>
+          <span>並び替え</span>
+          <select id="sortBy">
+            <option value="usage_desc">使用率が高い順</option>
+            <option value="reset_asc">次回リセットが近い順</option>
+            <option value="service_asc">サービス名順</option>
+            <option value="updated_desc">最終更新が新しい順</option>
+          </select>
+        </label>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>ダッシュボード</h2>
+          <span id="resultCount" class="muted"></span>
+        </div>
+        <div id="cards" class="cards"></div>
+      </section>
+
+      <section class="grid">
+        <form id="collectorForm" class="panel collector-panel">
+          <h2>Collector実行</h2>
+          <p class="form-note">
+            dry_run=trueでも各ベンダーの管理APIへのGET通信は発生します。モデル推論APIは呼びません。
+            dry_run=falseの場合、取得結果をusage_recordsへ保存します。
+          </p>
+          <label>
+            <span>vendor</span>
+            <select name="vendor" id="collectorVendor">
+              <option value="openai">openai</option>
+              <option value="gemini">gemini</option>
+              <option value="claude">claude</option>
+            </select>
+          </label>
+          <label>
+            <span>dry_run</span>
+            <select name="dry_run" id="collectorDryRun">
+              <option value="true">true: 確認のみ。usage_recordsには保存しない</option>
+              <option value="false">false: usage_recordsに保存する</option>
+            </select>
+          </label>
+          <button id="collectorSubmit" type="submit">Collectorを実行</button>
+          <div id="collectorResult" class="collector-result-slot"></div>
+        </form>
+
+        <div class="panel collector-history-panel">
+          <div class="panel-heading">
+            <h2>Collector実行履歴</h2>
+            <span class="muted">最新10件</span>
+          </div>
+          <div id="collectorRuns"></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <form id="serviceForm" class="panel">
+          <h2>サービス登録</h2>
+          <input name="name" placeholder="ChatGPT" required />
+          <input name="provider" placeholder="OpenAI / Google / Anthropic" required />
+          <input name="plan_name" placeholder="手入力 / API Project" required />
+          <select name="account_type">
+            <option value="web_subscription">web_subscription</option>
+            <option value="api">api</option>
+          </select>
+          <button>サービスを登録</button>
+        </form>
+
+        <form id="limitForm" class="panel">
+          <h2>制限項目登録</h2>
+          <select name="service_id" id="serviceSelect" required></select>
+          <input name="model_name" placeholder="モデル名" required />
+          <input name="limit_type" placeholder="messages / tokens / api_cost" required />
+          <input name="max_value" type="number" step="0.01" placeholder="上限値。不明なら空欄" />
+          <input name="unit" placeholder="messages / tokens / usd / yen" required />
+          <select name="reset_interval_type">
+            <option value="hours">hours</option>
+            <option value="days">days</option>
+            <option value="weeks">weeks</option>
+            <option value="months">months</option>
+            <option value="manual">manual</option>
+          </select>
+          <input name="reset_interval_value" type="number" min="1" value="1" />
+          <input name="next_reset_at" type="datetime-local" />
+          <button>制限項目を登録</button>
+        </form>
+
+        <form id="usageForm" class="panel">
+          <h2>使用量入力</h2>
+          <p class="form-note" id="usageHelp">通常加算は現在値の上書きではありません。使用した分だけ加算します。</p>
+          <select name="limit_id" id="limitSelect" required></select>
+          <select name="mode" id="usageMode">
+            <option value="add">使用量を加算</option>
+            <option value="adjust">補正</option>
+          </select>
+          <input name="used_value" id="usedValueInput" type="number" step="0.01" min="0.01" placeholder="加算する使用量" required />
+          <input name="note" id="usageNote" placeholder="メモ" />
+          <button id="usageSubmit">使用量を加算</button>
+        </form>
+      </section>
+
+      <section class="grid">
+        <div class="panel">
+          <h2>アラート</h2>
+          <div id="alerts"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>使用履歴</h2>
+            <div class="history-actions">
+              <select id="historyFilter" aria-label="使用履歴フィルター">
+                <option value="all">すべて</option>
+                <option value="manual">手入力</option>
+                <option value="adjust">補正</option>
+                <option value="openai">OpenAI API</option>
+                <option value="gemini">Gemini API</option>
+                <option value="claude">Claude API</option>
+                <option value="api">API由来すべて</option>
+              </select>
+              <button id="exportUsageCsv" type="button">usage records CSV Export</button>
+            </div>
+          </div>
+          <div id="history"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
