@@ -1,7 +1,9 @@
 const state = {
   dashboard: [],
+  limits: [],
   history: [],
   collectorRuns: [],
+  editingLimitId: null,
 };
 
 const api = async (path, options = {}) => {
@@ -19,6 +21,14 @@ const fmtNumber = (value) => {
 };
 const fmtDate = (value) => (value ? new Date(value).toLocaleString("ja-JP") : "未設定");
 const dateValue = (value, fallback) => (value ? new Date(value).getTime() : fallback);
+
+function toDatetimeLocalValue(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -114,6 +124,7 @@ async function loadAll() {
     api("/api/collector-runs"),
   ]);
   state.dashboard = dashboard;
+  state.limits = limits;
   state.history = history;
   state.collectorRuns = collectorRuns;
   renderSelects(services, limits);
@@ -170,6 +181,9 @@ function renderCard(row) {
     `
     : `<div class="manual-required">使用率計算には上限値の登録が必要です。</div>`;
 
+  const isEditing = state.editingLimitId === row.limit_id;
+  const editingLimit = isEditing ? state.limits.find((l) => l.id === row.limit_id) : null;
+
   return `
     <article class="card">
       <div class="card-title">
@@ -177,9 +191,16 @@ function renderCard(row) {
           <h2>${escapeHtml(row.service_name)}</h2>
           <div class="muted">${escapeHtml(row.provider)} / ${escapeHtml(row.account_type)}</div>
         </div>
-        <span class="status ${statusClass(row.status)}">${escapeHtml(row.status)}</span>
+        <div class="card-title-actions">
+          <span class="status ${statusClass(row.status)}">${escapeHtml(row.status)}</span>
+          ${!isEditing ? `<button type="button" class="edit-limit-button" data-limit-id="${row.limit_id}">編集</button>` : ""}
+        </div>
       </div>
 
+      ${
+        isEditing && editingLimit
+          ? limitEditFormHtml(editingLimit)
+          : `
       <dl class="details">
         <div><dt>プラン</dt><dd>${escapeHtml(row.plan_name)}</dd></div>
         <div><dt>モデル</dt><dd>${escapeHtml(row.model_name)}</dd></div>
@@ -195,7 +216,50 @@ function renderCard(row) {
         <div><span>次回リセット</span><strong>${fmtDate(row.next_reset_at)}</strong></div>
         <div><span>最終更新</span><strong>${fmtDate(row.last_updated_at)}</strong></div>
       </div>
+      `
+      }
     </article>
+  `;
+}
+
+function limitEditFormHtml(limit) {
+  const maxValueValue = limit.max_value === null || limit.max_value === undefined ? "" : limit.max_value;
+  const resetTypes = ["hours", "days", "weeks", "months", "manual"];
+  return `
+    <form class="edit-limit-form" data-limit-id="${limit.id}">
+      <label>
+        <span>表示名</span>
+        <input name="model_name" value="${escapeHtml(limit.model_name)}" required />
+      </label>
+      <label>
+        <span>上限値</span>
+        <input name="max_value" type="number" step="0.01" value="${escapeHtml(String(maxValueValue))}" placeholder="不明なら空欄" />
+      </label>
+      <label>
+        <span>単位</span>
+        <input name="unit" value="${escapeHtml(limit.unit)}" required />
+      </label>
+      <label>
+        <span>リセット種別</span>
+        <select name="reset_interval_type">
+          ${resetTypes
+            .map(
+              (type) =>
+                `<option value="${type}" ${limit.reset_interval_type === type ? "selected" : ""}>${type}</option>`,
+            )
+            .join("")}
+        </select>
+      </label>
+      <label>
+        <span>次回リセット日時</span>
+        <input name="next_reset_at" type="datetime-local" value="${toDatetimeLocalValue(limit.next_reset_at)}" />
+      </label>
+      <div id="editLimitError-${limit.id}" class="edit-limit-error"></div>
+      <div class="edit-limit-actions">
+        <button type="submit">保存</button>
+        <button type="button" class="cancel-edit-limit" data-limit-id="${limit.id}">キャンセル</button>
+      </div>
+    </form>
   `;
 }
 
@@ -327,6 +391,51 @@ function initApp() {
     await api("/api/limits", { method: "POST", body: JSON.stringify(data) });
     event.target.reset();
     await loadAll();
+  });
+
+  document.querySelector("#cards").addEventListener("click", (event) => {
+    const editButton = event.target.closest(".edit-limit-button");
+    if (editButton) {
+      state.editingLimitId = Number(editButton.dataset.limitId);
+      renderDashboard();
+      return;
+    }
+    const cancelButton = event.target.closest(".cancel-edit-limit");
+    if (cancelButton) {
+      state.editingLimitId = null;
+      renderDashboard();
+    }
+  });
+
+  document.querySelector("#cards").addEventListener("submit", async (event) => {
+    const form = event.target.closest(".edit-limit-form");
+    if (!form) return;
+    event.preventDefault();
+
+    const limitId = form.dataset.limitId;
+    const errorTarget = document.querySelector(`#editLimitError-${limitId}`);
+    errorTarget.innerHTML = "";
+
+    const data = Object.fromEntries(new FormData(form));
+    const payload = {
+      model_name: data.model_name,
+      unit: data.unit,
+      reset_interval_type: data.reset_interval_type,
+      max_value: data.max_value === "" ? null : Number(data.max_value),
+      next_reset_at: data.next_reset_at ? new Date(data.next_reset_at).toISOString() : null,
+    };
+
+    const submitButton = form.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    try {
+      await api(`/api/limits/${limitId}`, { method: "PUT", body: JSON.stringify(payload) });
+      state.editingLimitId = null;
+      await loadAll();
+    } catch (error) {
+      errorTarget.innerHTML = escapeHtml(error.message);
+    } finally {
+      submitButton.disabled = false;
+    }
   });
 
   document.querySelector("#usageForm").addEventListener("submit", async (event) => {

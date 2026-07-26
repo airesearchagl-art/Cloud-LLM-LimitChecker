@@ -41,6 +41,24 @@ class LimitRead(LimitCreate):
     model_config = {"from_attributes": True}
 
 
+class LimitUpdate(BaseModel):
+    model_name: str
+    max_value: float | None = None
+    unit: str
+    reset_interval_type: str = "manual"
+    next_reset_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_limit_update(self) -> "LimitUpdate":
+        if not self.model_name.strip():
+            raise ValueError("model_name must not be empty")
+        if not self.unit.strip():
+            raise ValueError("unit must not be empty")
+        if self.max_value is not None and self.max_value < 0:
+            raise ValueError("max_value must not be negative")
+        return self
+
+
 class UsageCreate(BaseModel):
     used_value: float
     mode: Literal["add", "adjust", "set"] = "add"

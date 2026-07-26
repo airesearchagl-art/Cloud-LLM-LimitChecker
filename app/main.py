@@ -140,6 +140,14 @@ def create_limit(payload: schemas.LimitCreate, db: Session = Depends(get_db)) ->
     return crud.create_limit(db, payload)
 
 
+@app.put("/api/limits/{limit_id}", response_model=schemas.LimitRead)
+def update_limit(limit_id: int, payload: schemas.LimitUpdate, db: Session = Depends(get_db)) -> models.Limit:
+    try:
+        return crud.update_limit(db, limit_id, payload)
+    except crud.LimitNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/api/limits/{limit_id}/usage", response_model=schemas.UsageRead)
 def add_usage(limit_id: int, payload: schemas.UsageCreate, db: Session = Depends(get_db)) -> models.UsageRecord:
     try:

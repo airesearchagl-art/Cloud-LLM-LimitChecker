@@ -113,6 +113,45 @@ main {
   margin-bottom: 4px;
 }
 
+.card-title-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.edit-limit-button {
+  min-height: auto;
+  padding: 5px 10px;
+  width: auto;
+}
+
+.edit-limit-form {
+  margin: 16px 0;
+}
+
+.edit-limit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.edit-limit-actions button {
+  width: auto;
+}
+
+.edit-limit-error {
+  background: #fff4f4;
+  border-left: 4px solid #c62828;
+  color: #8f1d1d;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.edit-limit-error:empty {
+  display: none;
+  padding: 0;
+}
+
 .status {
   border-radius: 999px;
   font-size: 12px;

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app import models
+from app import crud, models, schemas
 from app.database import get_db
 from app.main import app
 from app.maintenance import remove_empty_duplicate_manual_required_limits
@@ -931,3 +931,167 @@ def test_seed_api_enabled_returns_200(api_client: tuple[TestClient, Session, int
     response = client.post("/api/seed")
     assert response.status_code == 200
     assert {"services", "limits", "normalized", "removed"}.issubset(response.json().keys())
+
+
+def test_update_limit_returns_200_and_updates_fields(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={
+            "model_name": "renamed_model",
+            "max_value": 200,
+            "unit": "requests",
+            "reset_interval_type": "weeks",
+            "next_reset_at": "2026-02-01T00:00:00+09:00",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model_name"] == "renamed_model"
+    assert body["max_value"] == 200
+    assert body["unit"] == "requests"
+    assert body["reset_interval_type"] == "weeks"
+
+
+def test_update_limit_missing_limit_returns_404(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, _ = api_client
+    response = client.put(
+        "/api/limits/999999",
+        json={"model_name": "x", "max_value": None, "unit": "messages", "reset_interval_type": "manual"},
+    )
+    assert response.status_code == 404
+
+
+def test_update_limit_rejects_negative_max_value(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "x", "max_value": -1, "unit": "messages", "reset_interval_type": "manual"},
+    )
+    assert response.status_code == 422
+
+
+def test_update_limit_rejects_empty_unit(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "x", "max_value": None, "unit": "", "reset_interval_type": "manual"},
+    )
+    assert response.status_code == 422
+
+
+def test_update_limit_rejects_empty_model_name(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "   ", "max_value": None, "unit": "messages", "reset_interval_type": "manual"},
+    )
+    assert response.status_code == 422
+
+
+def test_update_limit_ignores_id_and_service_id_fields(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={
+            "id": 999999,
+            "service_id": 999999,
+            "model_name": "keep_service",
+            "max_value": None,
+            "unit": "messages",
+            "reset_interval_type": "manual",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == limit_id
+    assert body["service_id"] != 999999
+
+
+def test_update_limit_does_not_affect_other_limits(api_client: tuple[TestClient, Session, int]) -> None:
+    client, db, limit_id = api_client
+    existing_limit = db.get(models.Limit, limit_id)
+    service = db.get(models.Service, existing_limit.service_id)
+    other_limit = create_limit(db, service, max_value=50)
+    db.commit()
+
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "only_this_one", "max_value": 300, "unit": "requests", "reset_interval_type": "manual"},
+    )
+    assert response.status_code == 200
+
+    other_response = client.get("/api/limits", params={"service_id": service.id})
+    other_body = next(item for item in other_response.json() if item["id"] == other_limit.id)
+    assert other_body["model_name"] == "manual_model"
+    assert other_body["max_value"] == 50
+
+
+def test_update_limit_get_reflects_new_values(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "after_update", "max_value": 42, "unit": "tokens", "reset_interval_type": "hours"},
+    )
+    response = client.get("/api/limits")
+    body = next(item for item in response.json() if item["id"] == limit_id)
+    assert body["model_name"] == "after_update"
+    assert body["max_value"] == 42
+    assert body["unit"] == "tokens"
+    assert body["reset_interval_type"] == "hours"
+
+
+def test_update_limit_rolls_back_on_commit_failure() -> None:
+    with next(make_session()) as db:
+        service = create_service(db)
+        limit = create_limit(db, service, max_value=100)
+        db.commit()
+
+        original_commit = db.commit
+        calls = {"count": 0}
+
+        def failing_commit() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("commit failed")
+            original_commit()
+
+        db.commit = failing_commit
+        payload = schemas.LimitUpdate(model_name="broken_update", max_value=999, unit="messages", reset_interval_type="manual")
+        with pytest.raises(RuntimeError):
+            crud.update_limit(db, limit.id, payload)
+
+        db.commit = original_commit
+        refreshed = db.get(models.Limit, limit.id)
+        db.refresh(refreshed)
+
+    assert refreshed.model_name == "manual_model"
+    assert refreshed.max_value == 100
+
+
+def test_update_limit_session_reusable_after_commit_failure() -> None:
+    with next(make_session()) as db:
+        service = create_service(db)
+        limit = create_limit(db, service, max_value=100)
+        db.commit()
+
+        original_commit = db.commit
+        calls = {"count": 0}
+
+        def failing_commit() -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise RuntimeError("commit failed")
+            original_commit()
+
+        db.commit = failing_commit
+        bad_payload = schemas.LimitUpdate(model_name="broken", max_value=1, unit="messages", reset_interval_type="manual")
+        with pytest.raises(RuntimeError):
+            crud.update_limit(db, limit.id, bad_payload)
+
+        db.commit = original_commit
+        good_payload = schemas.LimitUpdate(model_name="fixed", max_value=5, unit="messages", reset_interval_type="manual")
+        updated = crud.update_limit(db, limit.id, good_payload)
+
+    assert updated.model_name == "fixed"
+    assert updated.max_value == 5
