@@ -58,7 +58,7 @@ class ResourceRateLimit:
     remaining_percent: float | None
     reset_at_utc: datetime | None
     reset_at_local: datetime | None
-    seconds_until_reset: int | None
+    seconds_until_reset: int | None  # negative once reset time has passed
     collected_at: datetime
     error_message: str | None = None
 
@@ -113,7 +113,7 @@ def _coerce_resource_fields(raw: dict) -> tuple[int, int, int, int]:
     return limit, used, remaining, reset
 
 
-def _error_resource(resource: ResourceName, now: datetime, message: str) -> ResourceRateLimit:
+def _error_resource(resource: ResourceName, collected_at: datetime, message: str) -> ResourceRateLimit:
     return ResourceRateLimit(
         resource=resource,
         status="Error",
@@ -125,7 +125,7 @@ def _error_resource(resource: ResourceName, now: datetime, message: str) -> Reso
         reset_at_utc=None,
         reset_at_local=None,
         seconds_until_reset=None,
-        collected_at=now,
+        collected_at=collected_at,
         error_message=message,
     )
 
@@ -140,22 +140,34 @@ def build_resource_rate_limit(
     """Build a single resource's rate-limit state from raw fixture data.
 
     `raw` is never mutated. `raw is None` (resource absent from the fetched
-    payload) and any structurally/semantically invalid `raw` both produce an
-    "Error" status resource instead of raising.
+    payload), any structurally/semantically invalid `raw`, and a `reset` value
+    datetime cannot represent (e.g. out of platform range) all produce an
+    "Error" status resource instead of raising. `collected_at` is always
+    `now` normalized to UTC — Phase A never reads a caller-supplied
+    `collected_at` out of `raw`, since real GitHub API responses have no such
+    field.
+
+    `seconds_until_reset` keeps its sign: negative means reset time has
+    already passed (status "Reset overdue").
     """
     _require_aware(now)
+    collected_at = now.astimezone(timezone.utc)
 
     if raw is None:
-        return _error_resource(resource, now, _UNAVAILABLE_MESSAGE)
+        return _error_resource(resource, collected_at, _UNAVAILABLE_MESSAGE)
 
     try:
         limit, used, remaining, reset_epoch = _coerce_resource_fields(raw)
     except _ResourceDataError as exc:
-        return _error_resource(resource, now, str(exc))
+        return _error_resource(resource, collected_at, str(exc))
 
-    now_epoch = int(now.timestamp())
-    reset_at_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+    try:
+        reset_at_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return _error_resource(resource, collected_at, "reset timestamp is out of range")
+
     reset_at_local = reset_at_utc.astimezone(tz)
+    now_epoch = int(now.timestamp())
 
     if remaining == 0:
         status: ResourceStatus = "Exhausted" if now_epoch <= reset_epoch else "Reset overdue"
@@ -163,10 +175,6 @@ def build_resource_rate_limit(
         status = "Warning"
     else:
         status = "Normal"
-
-    collected_at = raw.get("collected_at")
-    if not isinstance(collected_at, datetime):
-        collected_at = now
 
     return ResourceRateLimit(
         resource=resource,
@@ -230,4 +238,4 @@ def parse_github_rate_limit(
         for name in TARGET_RESOURCES
     }
     overall = determine_overall(resources["core"], resources["graphql"])
-    return GitHubRateLimitReport(resources=resources, overall=overall, collected_at=now)
+    return GitHubRateLimitReport(resources=resources, overall=overall, collected_at=now.astimezone(timezone.utc))

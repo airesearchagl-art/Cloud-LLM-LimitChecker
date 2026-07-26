@@ -314,3 +314,94 @@ def test_input_payload_is_not_mutated():
     parse_github_rate_limit(payload, now=NOW)
 
     assert payload == before
+
+
+HUGE_RESET = 999_999_999_999_999
+
+
+# collected_atはaware nowをUTCへ正規化する
+def test_collected_at_is_normalized_to_utc_from_jst_now():
+    jst_now = NOW.astimezone(ZoneInfo("Asia/Tokyo"))
+    r = build_resource_rate_limit(
+        "core", resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60), now=jst_now
+    )
+    assert r.collected_at == NOW
+    assert r.collected_at.tzinfo is timezone.utc
+
+
+def test_resource_collected_at_is_timezone_aware():
+    r = build_resource_rate_limit(
+        "core", resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60), now=NOW
+    )
+    assert r.collected_at.tzinfo is not None
+
+
+def test_report_collected_at_is_timezone_aware_utc():
+    payload = {
+        "resources": {
+            "core": resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60),
+            "graphql": resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60),
+        }
+    }
+    jst_now = NOW.astimezone(ZoneInfo("Asia/Tokyo"))
+    report = parse_github_rate_limit(payload, now=jst_now)
+    assert report.collected_at == NOW
+    assert report.collected_at.tzinfo is timezone.utc
+
+
+def test_naive_now_is_still_rejected():
+    naive_now = datetime(2026, 7, 26, 12, 0, 0)
+    with pytest.raises(ValueError):
+        build_resource_rate_limit(
+            "core", resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60), now=naive_now
+        )
+    with pytest.raises(ValueError):
+        parse_github_rate_limit(
+            {"resources": {"core": resource(), "graphql": resource()}}, now=naive_now
+        )
+
+
+def test_huge_reset_value_makes_resource_error():
+    r = build_resource_rate_limit(
+        "core", resource(limit=5000, used=100, remaining=4900, reset=HUGE_RESET), now=NOW
+    )
+    assert r.status == "Error"
+    assert "token" not in r.error_message.lower()
+    assert "reset timestamp is out of range" == r.error_message
+
+
+def test_huge_reset_on_one_resource_does_not_affect_the_other():
+    payload = {
+        "resources": {
+            "core": resource(limit=5000, used=100, remaining=4900, reset=HUGE_RESET),
+            "graphql": resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60),
+        }
+    }
+    report = parse_github_rate_limit(payload, now=NOW)
+    assert report.resources["core"].status == "Error"
+    assert report.resources["graphql"].status == "Normal"
+
+
+def test_huge_reset_on_primary_resource_makes_overall_error():
+    payload = {
+        "resources": {
+            "core": resource(limit=5000, used=100, remaining=4900, reset=HUGE_RESET),
+            "graphql": resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60),
+        }
+    }
+    report = parse_github_rate_limit(payload, now=NOW)
+    assert report.overall.status == "Error"
+
+
+def test_reset_datetime_conversion_errors_never_escape_parse():
+    payload = {
+        "resources": {
+            "core": resource(limit=5000, used=100, remaining=4900, reset=HUGE_RESET),
+            "graphql": resource(limit=5000, used=100, remaining=4900, reset=-HUGE_RESET),
+            "search": resource(limit=30, used=1, remaining=29, reset=HUGE_RESET),
+        }
+    }
+    report = parse_github_rate_limit(payload, now=NOW)
+    assert report.resources["core"].status == "Error"
+    assert report.resources["graphql"].status == "Error"
+    assert report.resources["search"].status == "Error"
