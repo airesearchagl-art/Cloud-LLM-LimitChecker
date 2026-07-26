@@ -46,6 +46,7 @@ def update_limit(db: Session, limit_id: int, payload: schemas.LimitUpdate) -> mo
     limit.max_value = payload.max_value
     limit.unit = payload.unit
     limit.reset_interval_type = payload.reset_interval_type
+    limit.reset_interval_value = payload.reset_interval_value
     limit.next_reset_at = payload.next_reset_at
     limit.updated_at = now_local()
     db.add(limit)

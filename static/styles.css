@@ -152,6 +152,11 @@ main {
   padding: 0;
 }
 
+.edit-limit-form input:disabled {
+  background: #f0f3f4;
+  color: #7c8990;
+}
+
 .status {
   border-radius: 999px;
   font-size: 12px;

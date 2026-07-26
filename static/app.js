@@ -225,6 +225,7 @@ function renderCard(row) {
 function limitEditFormHtml(limit) {
   const maxValueValue = limit.max_value === null || limit.max_value === undefined ? "" : limit.max_value;
   const resetTypes = ["hours", "days", "weeks", "months", "manual"];
+  const isManual = limit.reset_interval_type === "manual";
   return `
     <form class="edit-limit-form" data-limit-id="${limit.id}">
       <label>
@@ -241,7 +242,7 @@ function limitEditFormHtml(limit) {
       </label>
       <label>
         <span>リセット種別</span>
-        <select name="reset_interval_type">
+        <select name="reset_interval_type" class="reset-interval-type-input">
           ${resetTypes
             .map(
               (type) =>
@@ -251,8 +252,25 @@ function limitEditFormHtml(limit) {
         </select>
       </label>
       <label>
+        <span>リセット間隔</span>
+        <input
+          name="reset_interval_value"
+          class="reset-interval-value-input"
+          type="number"
+          min="1"
+          value="${limit.reset_interval_value}"
+          ${isManual ? "disabled" : ""}
+        />
+      </label>
+      <label>
         <span>次回リセット日時</span>
-        <input name="next_reset_at" type="datetime-local" value="${toDatetimeLocalValue(limit.next_reset_at)}" />
+        <input
+          name="next_reset_at"
+          class="next-reset-at-input"
+          type="datetime-local"
+          value="${isManual ? "" : toDatetimeLocalValue(limit.next_reset_at)}"
+          ${isManual ? "disabled" : ""}
+        />
       </label>
       <div id="editLimitError-${limit.id}" class="edit-limit-error"></div>
       <div class="edit-limit-actions">
@@ -407,6 +425,20 @@ function initApp() {
     }
   });
 
+  document.querySelector("#cards").addEventListener("change", (event) => {
+    const typeSelect = event.target.closest(".reset-interval-type-input");
+    if (!typeSelect) return;
+    const form = typeSelect.closest(".edit-limit-form");
+    const valueInput = form.querySelector(".reset-interval-value-input");
+    const nextResetInput = form.querySelector(".next-reset-at-input");
+    const isManual = typeSelect.value === "manual";
+    valueInput.disabled = isManual;
+    nextResetInput.disabled = isManual;
+    if (isManual) {
+      nextResetInput.value = "";
+    }
+  });
+
   document.querySelector("#cards").addEventListener("submit", async (event) => {
     const form = event.target.closest(".edit-limit-form");
     if (!form) return;
@@ -421,6 +453,7 @@ function initApp() {
       model_name: data.model_name,
       unit: data.unit,
       reset_interval_type: data.reset_interval_type,
+      reset_interval_value: data.reset_interval_value === undefined ? 1 : Number(data.reset_interval_value),
       max_value: data.max_value === "" ? null : Number(data.max_value),
       next_reset_at: data.next_reset_at ? new Date(data.next_reset_at).toISOString() : null,
     };

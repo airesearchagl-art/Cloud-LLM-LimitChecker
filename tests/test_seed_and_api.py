@@ -942,6 +942,7 @@ def test_update_limit_returns_200_and_updates_fields(api_client: tuple[TestClien
             "max_value": 200,
             "unit": "requests",
             "reset_interval_type": "weeks",
+            "reset_interval_value": 2,
             "next_reset_at": "2026-02-01T00:00:00+09:00",
         },
     )
@@ -951,6 +952,71 @@ def test_update_limit_returns_200_and_updates_fields(api_client: tuple[TestClien
     assert body["max_value"] == 200
     assert body["unit"] == "requests"
     assert body["reset_interval_type"] == "weeks"
+    assert body["reset_interval_value"] == 2
+
+
+def test_update_limit_rejects_invalid_reset_interval_type(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={"model_name": "x", "max_value": None, "unit": "messages", "reset_interval_type": "years"},
+    )
+    assert response.status_code == 422
+
+
+def test_update_limit_rejects_reset_interval_value_below_one(api_client: tuple[TestClient, Session, int]) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={
+            "model_name": "x",
+            "max_value": None,
+            "unit": "messages",
+            "reset_interval_type": "days",
+            "reset_interval_value": 0,
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_update_limit_changes_reset_interval_type_and_value_together(
+    api_client: tuple[TestClient, Session, int],
+) -> None:
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={
+            "model_name": "renamed",
+            "max_value": None,
+            "unit": "messages",
+            "reset_interval_type": "days",
+            "reset_interval_value": 3,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reset_interval_type"] == "days"
+    assert body["reset_interval_value"] == 3
+
+
+def test_update_limit_manual_type_accepts_next_reset_at_as_sent(
+    api_client: tuple[TestClient, Session, int],
+) -> None:
+    # 既存のLimitCreateと同様、reset_interval_type=manualでもnext_reset_atの
+    # 値自体は拒否しない(reset計算上は無視されるだけで、既存仕様に新しい制約は追加しない)。
+    client, _, limit_id = api_client
+    response = client.put(
+        f"/api/limits/{limit_id}",
+        json={
+            "model_name": "manual_with_date",
+            "max_value": None,
+            "unit": "messages",
+            "reset_interval_type": "manual",
+            "next_reset_at": "2026-03-01T00:00:00+09:00",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["next_reset_at"] is not None
 
 
 def test_update_limit_missing_limit_returns_404(api_client: tuple[TestClient, Session, int]) -> None:

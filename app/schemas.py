@@ -45,7 +45,8 @@ class LimitUpdate(BaseModel):
     model_name: str
     max_value: float | None = None
     unit: str
-    reset_interval_type: str = "manual"
+    reset_interval_type: Literal["hours", "days", "weeks", "months", "manual"] = "manual"
+    reset_interval_value: int = 1
     next_reset_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -56,6 +57,8 @@ class LimitUpdate(BaseModel):
             raise ValueError("unit must not be empty")
         if self.max_value is not None and self.max_value < 0:
             raise ValueError("max_value must not be negative")
+        if self.reset_interval_value < 1:
+            raise ValueError("reset_interval_value must be at least 1")
         return self
 
 
