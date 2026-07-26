@@ -53,6 +53,18 @@ uvicorn app.main:app --reload
 http://127.0.0.1:8000
 ```
 
+## Windows Standard Commands
+
+`.venv` が未作成の場合は、お使いのPython 3.xで作成してください（`python -m venv .venv`）。作成後は、以下のコマンドを標準の実行方法とします。
+
+```text
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001
+```
+
+`.venv` はGit管理対象外です（`.gitignore`で除外済み）。依存パッケージのバージョン更新は、この手順の一部としてではなく、`requirements.txt`の変更内容とpytest実行結果を明示的に確認する別PRで行ってください。
+
 ## Usage Records
 
 使用量入力には「通常加算」と「補正」があります。
