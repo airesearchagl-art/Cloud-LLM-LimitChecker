@@ -37,6 +37,28 @@ def create_limit(db: Session, payload: schemas.LimitCreate) -> models.Limit:
     return limit
 
 
+def update_limit(db: Session, limit_id: int, payload: schemas.LimitUpdate) -> models.Limit:
+    limit = db.get(models.Limit, limit_id)
+    if limit is None:
+        raise LimitNotFoundError("limit not found")
+
+    limit.model_name = payload.model_name
+    limit.max_value = payload.max_value
+    limit.unit = payload.unit
+    limit.reset_interval_type = payload.reset_interval_type
+    limit.reset_interval_value = payload.reset_interval_value
+    limit.next_reset_at = payload.next_reset_at
+    limit.updated_at = now_local()
+    db.add(limit)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(limit)
+    return limit
+
+
 def add_usage(db: Session, limit_id: int, payload: schemas.UsageCreate) -> models.UsageRecord:
     limit = db.get(models.Limit, limit_id)
     if limit is None:
