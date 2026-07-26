@@ -151,26 +151,28 @@ def build_resource_rate_limit(
     already passed (status "Reset overdue").
     """
     _require_aware(now)
-    collected_at = now.astimezone(timezone.utc)
+    normalized_now = now.astimezone(timezone.utc)
 
     if raw is None:
-        return _error_resource(resource, collected_at, _UNAVAILABLE_MESSAGE)
+        return _error_resource(resource, normalized_now, _UNAVAILABLE_MESSAGE)
 
     try:
         limit, used, remaining, reset_epoch = _coerce_resource_fields(raw)
     except _ResourceDataError as exc:
-        return _error_resource(resource, collected_at, str(exc))
+        return _error_resource(resource, normalized_now, str(exc))
 
     try:
         reset_at_utc = datetime.fromtimestamp(reset_epoch, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
-        return _error_resource(resource, collected_at, "reset timestamp is out of range")
+        return _error_resource(resource, normalized_now, "reset timestamp is out of range")
 
     reset_at_local = reset_at_utc.astimezone(tz)
     now_epoch = int(now.timestamp())
 
+    # Compare aware datetimes directly rather than truncated epoch seconds,
+    # so a reset overrun of less than one second is still "Reset overdue".
     if remaining == 0:
-        status: ResourceStatus = "Exhausted" if now_epoch <= reset_epoch else "Reset overdue"
+        status: ResourceStatus = "Exhausted" if normalized_now <= reset_at_utc else "Reset overdue"
     elif remaining * 5 <= limit:
         status = "Warning"
     else:
@@ -187,7 +189,7 @@ def build_resource_rate_limit(
         reset_at_utc=reset_at_utc,
         reset_at_local=reset_at_local,
         seconds_until_reset=reset_epoch - now_epoch,
-        collected_at=collected_at,
+        collected_at=normalized_now,
         error_message=None,
     )
 

@@ -1,6 +1,6 @@
 import copy
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -405,3 +405,46 @@ def test_reset_datetime_conversion_errors_never_escape_parse():
     assert report.resources["core"].status == "Error"
     assert report.resources["graphql"].status == "Error"
     assert report.resources["search"].status == "Error"
+
+
+def test_exhausted_when_now_exactly_equals_reset_datetime():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=reset_at
+    )
+    assert r.status == "Exhausted"
+
+
+def test_reset_overdue_one_microsecond_after_reset_datetime():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    now = reset_at + timedelta(microseconds=1)
+    r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=now
+    )
+    assert r.status == "Reset overdue"
+
+
+def test_sub_second_boundary_holds_under_jst_now():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    tokyo = ZoneInfo("Asia/Tokyo")
+
+    exactly_at_reset = reset_at.astimezone(tokyo)
+    one_microsecond_late = (reset_at + timedelta(microseconds=1)).astimezone(tokyo)
+
+    exhausted = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=exactly_at_reset
+    )
+    overdue = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=one_microsecond_late
+    )
+
+    assert exhausted.status == "Exhausted"
+    assert overdue.status == "Reset overdue"
+
+
+@pytest.mark.parametrize("field", ["limit", "used", "remaining", "reset"])
+def test_bool_values_are_rejected_as_error(field):
+    raw = resource(limit=5000, used=100, remaining=4900, reset=NOW_EPOCH + 60)
+    raw[field] = True if field != "used" else False
+    r = build_resource_rate_limit("core", raw, now=NOW)
+    assert r.status == "Error"
