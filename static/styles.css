@@ -541,3 +541,94 @@ button:hover {
     grid-template-columns: 1fr;
   }
 }
+
+#githubRateLimitPanel .panel-heading button {
+  min-width: 120px;
+  width: auto;
+}
+
+.github-overall {
+  border-radius: 8px;
+  font-weight: 700;
+  padding: 8px 12px;
+}
+
+.github-error {
+  background: #fff4f4;
+  border-left: 4px solid #c62828;
+  color: #8f1d1d;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.github-resource-cards {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 12px;
+}
+
+.github-resource-card {
+  background: #f7f9fa;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+}
+
+.github-resource-title {
+  font-weight: 700;
+}
+
+.github-resource-status {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 8px;
+  white-space: nowrap;
+  width: fit-content;
+}
+
+.github-resource-metric {
+  color: #46545c;
+  font-size: 13px;
+}
+
+.github-resource-error {
+  color: #8f1d1d;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.github-status-normal {
+  background: #dcefe4;
+  color: #145a35;
+}
+
+.github-status-warning {
+  background: #fff1bd;
+  color: #745400;
+}
+
+.github-status-exhausted {
+  background: #ffd7d7;
+  color: #9d1919;
+}
+
+.github-status-overdue {
+  background: #ffd7d7;
+  color: #9d1919;
+}
+
+.github-status-error {
+  background: #e6eaed;
+  color: #46545c;
+}
+
+.github-status-unknown {
+  background: #e6eaed;
+  color: #46545c;
+}

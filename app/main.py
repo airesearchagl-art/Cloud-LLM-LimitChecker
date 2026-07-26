@@ -3,6 +3,7 @@ import base64
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -35,7 +36,14 @@ from app.collectors.openai_collector import (
 )
 from app.database import Base, SessionLocal, engine, get_db
 from app.exporter import export_json, export_limits_csv, export_usage_records_csv
+from app.github_rate_limit_cli import fetch_github_rate_limit
+from app.github_rate_limit_state import (
+    GitHubRateLimitController,
+    GitHubRateLimitRefreshCooldownError,
+    GitHubRateLimitRefreshInProgressError,
+)
 from app.seed import seed_from_yaml
+from app.time_utils import app_tz
 from app.safety import (
     CollectorDailyLimitExceededError,
     UnknownCollectorVendorError,
@@ -104,6 +112,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="Cloud LLM Limit Checker", version="0.1.0", lifespan=lifespan)
 app.add_middleware(OptionalBasicAuthMiddleware)
+
+# Process-local only (see GitHubRateLimitController docstring): not persisted,
+# not shared across worker processes. Page load never triggers a fetch here —
+# only the POST refresh endpoint below calls the CLI adapter.
+app.state.github_rate_limit_controller = GitHubRateLimitController()
+
+
+def _current_utc_time() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @app.get("/api/health")
@@ -343,6 +360,39 @@ def export_usage_records_as_csv(db: Session = Depends(get_db)) -> Response:
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="usage-records.csv"'},
     )
+
+
+@app.get("/api/github-rate-limit")
+def get_github_rate_limit() -> dict:
+    """Return the currently held state only — never runs `gh` here."""
+    controller: GitHubRateLimitController = app.state.github_rate_limit_controller
+    return controller.snapshot()
+
+
+@app.post("/api/github-rate-limit/refresh")
+def refresh_github_rate_limit() -> dict:
+    """The only endpoint that invokes the GitHub CLI adapter."""
+    controller: GitHubRateLimitController = app.state.github_rate_limit_controller
+    try:
+        return controller.refresh(now=_current_utc_time(), fetch=fetch_github_rate_limit, tz=app_tz())
+    except GitHubRateLimitRefreshCooldownError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "cooldown_active",
+                "user_message": "更新の間隔が短すぎます。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
+    except GitHubRateLimitRefreshInProgressError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "already_refreshing",
+                "user_message": "更新を実行中です。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": 0,
+            },
+        ) from exc
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

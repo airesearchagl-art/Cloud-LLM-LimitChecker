@@ -97,6 +97,19 @@
         </div>
       </section>
 
+      <section>
+        <div class="panel" id="githubRateLimitPanel">
+          <div class="panel-heading">
+            <h2>GitHub API Rate Limit</h2>
+            <button id="githubRateLimitRefresh" type="button">更新</button>
+          </div>
+          <p class="form-note">
+            ページ表示だけでは取得しません。「更新」ボタンを押したときだけGitHub CLI経由で取得します。
+          </p>
+          <div id="githubRateLimitResult"></div>
+        </div>
+      </section>
+
       <section class="grid">
         <form id="serviceForm" class="panel">
           <h2>サービス登録</h2>

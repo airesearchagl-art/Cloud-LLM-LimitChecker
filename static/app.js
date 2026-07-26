@@ -91,6 +91,120 @@ function isApiSource(sourceType) {
   return ["api_openai_management", "api_gemini_management", "api_claude_management"].includes(sourceType);
 }
 
+function githubResourceLabel(resourceName) {
+  const labels = {
+    core: "GitHub REST API",
+    graphql: "GitHub GraphQL API",
+    search: "GitHub Search API",
+  };
+  return labels[resourceName] || resourceName;
+}
+
+function githubStatusClass(status) {
+  if (status === "Normal") return "github-status-normal";
+  if (status === "Warning") return "github-status-warning";
+  if (status === "Exhausted") return "github-status-exhausted";
+  if (status === "Reset overdue") return "github-status-overdue";
+  if (status === "Error") return "github-status-error";
+  return "github-status-unknown";
+}
+
+function githubOverallClass(status) {
+  if (status === "Normal") return "github-status-normal";
+  if (status === "Warning") return "github-status-warning";
+  if (status === "Limited") return "github-status-exhausted";
+  if (status === "Error") return "github-status-error";
+  return "github-status-unknown";
+}
+
+function fmtGithubDate(value) {
+  if (!value) return "不明";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "不明";
+  return d.toLocaleString("ja-JP");
+}
+
+function fmtGithubDateUtc(value) {
+  if (!value) return "不明";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "不明";
+  return d.toLocaleString("ja-JP", { timeZone: "UTC" }) + " UTC";
+}
+
+function fmtSecondsUntilReset(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "不明";
+  if (seconds < 0) return "リセット時刻超過";
+  if (seconds < 60) return `あと${seconds}秒`;
+  return `あと${Math.floor(seconds / 60)}分`;
+}
+
+// DOMに触れない純粋関数: dataからHTML文字列を組み立てるだけ。テスト容易性のため分離している。
+function githubResourceCardHtml(resource) {
+  if (!resource) return "";
+  const statusHtml = `<span class="github-resource-status ${githubStatusClass(resource.status)}">${escapeHtml(resource.status)}</span>`;
+  if (resource.status === "Error") {
+    return `
+      <div class="github-resource-card">
+        <div class="github-resource-title">${escapeHtml(githubResourceLabel(resource.resource))}</div>
+        ${statusHtml}
+        <div class="github-resource-error">${escapeHtml(resource.error_message || "")}</div>
+      </div>`;
+  }
+  return `
+    <div class="github-resource-card">
+      <div class="github-resource-title">${escapeHtml(githubResourceLabel(resource.resource))}</div>
+      ${statusHtml}
+      <div class="github-resource-metric">残り ${fmtNumber(resource.remaining)} / ${fmtNumber(resource.limit)}</div>
+      <div class="github-resource-metric">使用 ${fmtNumber(resource.used)}（${fmtNumber(resource.usage_percent)}%）</div>
+      <div class="github-resource-metric">reset: ${fmtGithubDate(resource.reset_at_local)}</div>
+      <div class="github-resource-metric muted">reset (UTC): ${fmtGithubDateUtc(resource.reset_at_utc)}</div>
+      <div class="github-resource-metric">${fmtSecondsUntilReset(resource.seconds_until_reset)}</div>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: GET/POST /api/github-rate-limit のレスポンスからHTML文字列を組み立てる。
+function githubRateLimitHtml(data) {
+  if (!data) {
+    return `<p class="muted">状態: 未取得</p>`;
+  }
+
+  const usingLastKnown = !data.fetched && !!data.last_known;
+  const displayResources = data.fetched ? data.resources : usingLastKnown ? data.last_known.resources : null;
+  const displayOverall = data.fetched ? data.overall : usingLastKnown ? data.last_known.overall : null;
+
+  const errorHtml = data.error
+    ? `<div class="github-error">${escapeHtml(data.error.user_message || "取得に失敗しました")}</div>`
+    : "";
+
+  const staleNoticeHtml = usingLastKnown
+    ? `<p class="muted">直近の取得は失敗しました。以下は${escapeHtml(fmtGithubDate(data.last_known.collected_at))}時点の古い情報（未更新）です。</p>`
+    : "";
+
+  if (!displayResources) {
+    return `
+      <p class="muted">状態: 未取得</p>
+      ${errorHtml}`;
+  }
+
+  const overallHtml = displayOverall
+    ? `<div class="github-overall ${githubOverallClass(displayOverall.status)}">Overall: ${escapeHtml(displayOverall.status)} — ${escapeHtml(displayOverall.reason)}</div>`
+    : "";
+
+  return `
+    ${errorHtml}
+    ${staleNoticeHtml}
+    ${overallHtml}
+    <div class="github-resource-cards">
+      ${githubResourceCardHtml(displayResources.core)}
+      ${githubResourceCardHtml(displayResources.graphql)}
+      ${displayResources.search ? githubResourceCardHtml(displayResources.search) : ""}
+    </div>`;
+}
+
+function renderGithubRateLimit(data) {
+  document.querySelector("#githubRateLimitResult").innerHTML = githubRateLimitHtml(data);
+}
+
 function applyFiltersAndSort(rows) {
   const serviceText = document.querySelector("#filterService").value.trim().toLowerCase();
   const accountType = document.querySelector("#filterAccountType").value;
@@ -115,13 +229,14 @@ function applyFiltersAndSort(rows) {
 }
 
 async function loadAll() {
-  const [services, limits, dashboard, alerts, history, collectorRuns] = await Promise.all([
+  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit] = await Promise.all([
     api("/api/services"),
     api("/api/limits"),
     api("/api/dashboard"),
     api("/api/alerts"),
     api("/api/usage-records"),
     api("/api/collector-runs"),
+    api("/api/github-rate-limit"),
   ]);
   state.dashboard = dashboard;
   state.limits = limits;
@@ -132,11 +247,40 @@ async function loadAll() {
   renderAlerts(alerts);
   renderHistory();
   renderCollectorRuns();
+  renderGithubRateLimit(githubRateLimit);
 }
 
 async function refreshCollectorRuns() {
   state.collectorRuns = await api("/api/collector-runs");
   renderCollectorRuns();
+}
+
+let githubCooldownIntervalId = null;
+
+function stopGithubCooldownCountdown() {
+  if (githubCooldownIntervalId) {
+    clearInterval(githubCooldownIntervalId);
+    githubCooldownIntervalId = null;
+  }
+}
+
+function startGithubCooldownCountdown(retryAfterSeconds) {
+  stopGithubCooldownCountdown();
+  const button = document.querySelector("#githubRateLimitRefresh");
+  let remaining = Math.max(0, Math.ceil(retryAfterSeconds));
+  const tick = () => {
+    if (remaining <= 0) {
+      stopGithubCooldownCountdown();
+      button.disabled = false;
+      button.textContent = "更新";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = `更新（あと${remaining}秒）`;
+    remaining -= 1;
+  };
+  tick();
+  githubCooldownIntervalId = setInterval(tick, 1000);
 }
 
 function renderSelects(services, limits) {
@@ -512,6 +656,39 @@ function initApp() {
     }
   });
 
+  document.querySelector("#githubRateLimitRefresh").addEventListener("click", async () => {
+    stopGithubCooldownCountdown();
+    const button = document.querySelector("#githubRateLimitRefresh");
+    button.disabled = true;
+    button.textContent = "更新中...";
+    try {
+      const response = await fetch("/api/github-rate-limit/refresh", { method: "POST" });
+      if (response.status === 429) {
+        const body = await response.json().catch(() => ({}));
+        const detail = body.detail || {};
+        renderGithubRateLimit({ error: { user_message: detail.user_message } });
+        if (detail.retry_after_seconds > 0) {
+          startGithubCooldownCountdown(detail.retry_after_seconds);
+        } else {
+          button.disabled = false;
+          button.textContent = "更新";
+        }
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const data = await response.json();
+      renderGithubRateLimit(data);
+      button.disabled = false;
+      button.textContent = "更新";
+    } catch (error) {
+      renderGithubRateLimit({ error: { user_message: error.message } });
+      button.disabled = false;
+      button.textContent = "更新";
+    }
+  });
+
   for (const id of ["filterService", "filterAccountType", "filterStatus", "sortBy"]) {
     document.querySelector(`#${id}`).addEventListener("input", renderDashboard);
     document.querySelector(`#${id}`).addEventListener("change", renderDashboard);
@@ -543,5 +720,16 @@ if (typeof document !== "undefined") {
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { sourceTypeLabel, sourceTypeClass, collectorStatusClass };
+  module.exports = {
+    sourceTypeLabel,
+    sourceTypeClass,
+    collectorStatusClass,
+    githubResourceLabel,
+    githubStatusClass,
+    githubOverallClass,
+    fmtGithubDateUtc,
+    fmtSecondsUntilReset,
+    githubResourceCardHtml,
+    githubRateLimitHtml,
+  };
 }
