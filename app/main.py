@@ -113,6 +113,10 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     # registered via `call_soon_threadsafe` onto the loop that's actually
     # running — not a throwaway loop implicitly created on a worker thread.
     app_instance.state.event_loop = asyncio.get_running_loop()
+    # Strong references to in-flight auto-refresh Tasks, so they are not
+    # garbage-collected mid-execution (a well-known asyncio.create_task
+    # pitfall). Discarded automatically once each task finishes.
+    app_instance.state.auto_refresh_tasks = set()
     yield
 
 
@@ -376,9 +380,43 @@ def get_github_rate_limit() -> dict:
 
 
 def _run_scheduled_auto_refresh() -> None:
-    """Fired once by the event loop timer scheduled below. Never retries."""
+    """Timer callback, fired once on the event loop thread by `call_later`.
+
+    Must return immediately: it only schedules an asyncio Task and never
+    calls the blocking CLI adapter itself here, or the event loop would be
+    frozen for the duration of the `gh` subprocess call (up to its timeout).
+    The actual fetch happens inside `_run_scheduled_auto_refresh_async`, off
+    the event loop thread via `asyncio.to_thread`.
+    """
+    task = asyncio.create_task(_run_scheduled_auto_refresh_async())
+    app.state.auto_refresh_tasks.add(task)
+    task.add_done_callback(app.state.auto_refresh_tasks.discard)
+
+
+async def _run_scheduled_auto_refresh_async() -> None:
+    """Runs the one scheduled auto-refresh attempt without blocking the loop.
+
+    `controller.maybe_run_auto_refresh` (which calls the blocking, subprocess
+    based `fetch_github_rate_limit`) runs via `asyncio.to_thread`, so other
+    requests keep being served while `gh` runs. If the resulting snapshot
+    shows a *new* auto-refresh was armed (a fresh `reset_at_utc` appeared),
+    a follow-up one-shot timer is scheduled the same way a manual refresh
+    would. Any unexpected exception is swallowed unconditionally — this task
+    has no caller waiting on it, and nothing about the exception (which
+    could otherwise reference subprocess internals) is surfaced anywhere.
+    """
     controller: GitHubRateLimitController = app.state.github_rate_limit_controller
-    controller.maybe_run_auto_refresh(now=_current_utc_time(), fetch=fetch_github_rate_limit, tz=app_tz())
+    try:
+        snapshot = await asyncio.to_thread(
+            controller.maybe_run_auto_refresh,
+            now=_current_utc_time(),
+            fetch=fetch_github_rate_limit,
+            tz=app_tz(),
+        )
+    except Exception:
+        return
+    if snapshot is not None:
+        _schedule_auto_refresh_if_pending(snapshot)
 
 
 def _schedule_auto_refresh_if_pending(snapshot: dict) -> None:
