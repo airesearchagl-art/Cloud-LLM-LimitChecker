@@ -162,6 +162,24 @@ function githubResourceCardHtml(resource) {
     </div>`;
 }
 
+// DOMに触れない純粋関数: reset後の1回限定自動再取得に関する補助表示。
+// next_auto_refresh_atが過去でも負数のカウントダウンは表示しない。
+function githubAutoRefreshNoticeHtml(data) {
+  if (!data) return "";
+  if (data.refreshing) {
+    return `<p class="muted">自動確認中…</p>`;
+  }
+  if (data.auto_refresh_pending && data.next_auto_refresh_at) {
+    const secondsUntil = Math.floor((new Date(data.next_auto_refresh_at).getTime() - Date.now()) / 1000);
+    const relative = Number.isNaN(secondsUntil) ? "" : secondsUntil > 0 ? `（${fmtSecondsUntilReset(secondsUntil)}）` : "（まもなく）";
+    return `<p class="muted">reset後に1回だけ自動確認します。次回自動確認予定: ${fmtGithubDate(data.next_auto_refresh_at)}${relative}</p>`;
+  }
+  if (data.last_auto_refresh_error) {
+    return `<p class="muted">自動再取得に失敗しました: ${escapeHtml(data.last_auto_refresh_error.user_message || "")}</p>`;
+  }
+  return "";
+}
+
 // DOMに触れない純粋関数: GET/POST /api/github-rate-limit のレスポンスからHTML文字列を組み立てる。
 function githubRateLimitHtml(data) {
   if (!data) {
@@ -180,10 +198,13 @@ function githubRateLimitHtml(data) {
     ? `<p class="muted">直近の取得は失敗しました。以下は${escapeHtml(fmtGithubDate(data.last_known.collected_at))}時点の古い情報（未更新）です。</p>`
     : "";
 
+  const autoRefreshNoticeHtml = githubAutoRefreshNoticeHtml(data);
+
   if (!displayResources) {
     return `
       <p class="muted">状態: 未取得</p>
-      ${errorHtml}`;
+      ${errorHtml}
+      ${autoRefreshNoticeHtml}`;
   }
 
   const overallHtml = displayOverall
@@ -194,6 +215,7 @@ function githubRateLimitHtml(data) {
     ${errorHtml}
     ${staleNoticeHtml}
     ${overallHtml}
+    ${autoRefreshNoticeHtml}
     <div class="github-resource-cards">
       ${githubResourceCardHtml(displayResources.core)}
       ${githubResourceCardHtml(displayResources.graphql)}
@@ -731,5 +753,6 @@ if (typeof module !== "undefined") {
     fmtSecondsUntilReset,
     githubResourceCardHtml,
     githubRateLimitHtml,
+    githubAutoRefreshNoticeHtml,
   };
 }

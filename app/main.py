@@ -1,4 +1,5 @@
 import os
+import asyncio
 import base64
 import secrets
 from collections.abc import AsyncIterator
@@ -103,10 +104,15 @@ class OptionalBasicAuthMiddleware(BaseHTTPMiddleware):
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         seed_from_yaml(db)
+    # Captured on the real running event loop so the reset-aware auto-refresh
+    # timer (scheduled from a sync, threadpool-executed endpoint) can be
+    # registered via `call_soon_threadsafe` onto the loop that's actually
+    # running — not a throwaway loop implicitly created on a worker thread.
+    app_instance.state.event_loop = asyncio.get_running_loop()
     yield
 
 
@@ -369,12 +375,40 @@ def get_github_rate_limit() -> dict:
     return controller.snapshot()
 
 
+def _run_scheduled_auto_refresh() -> None:
+    """Fired once by the event loop timer scheduled below. Never retries."""
+    controller: GitHubRateLimitController = app.state.github_rate_limit_controller
+    controller.maybe_run_auto_refresh(now=_current_utc_time(), fetch=fetch_github_rate_limit, tz=app_tz())
+
+
+def _schedule_auto_refresh_if_pending(snapshot: dict) -> None:
+    """Arm a one-shot timer on the real event loop for a pending auto-refresh.
+
+    Process-local and best-effort: the timer lives only in this process's
+    event loop, is lost on restart, and (like the rest of this controller)
+    is not shared across worker processes. `call_soon_threadsafe` is used
+    because this runs from a synchronous, threadpool-executed endpoint —
+    calling `loop.call_later` directly from that thread would not be safe.
+    A stale/duplicate timer firing later is harmless: `maybe_run_auto_refresh`
+    always re-checks `auto_refresh_pending` first and no-ops if already
+    consumed, so this never causes more than one real attempt per reset.
+    """
+    if not snapshot.get("auto_refresh_pending") or not snapshot.get("next_auto_refresh_at"):
+        return
+    loop: asyncio.AbstractEventLoop | None = getattr(app.state, "event_loop", None)
+    if loop is None:
+        return
+    next_at = datetime.fromisoformat(snapshot["next_auto_refresh_at"])
+    delay_seconds = max(0.0, (next_at - _current_utc_time()).total_seconds())
+    loop.call_soon_threadsafe(loop.call_later, delay_seconds, _run_scheduled_auto_refresh)
+
+
 @app.post("/api/github-rate-limit/refresh")
 def refresh_github_rate_limit() -> dict:
-    """The only endpoint that invokes the GitHub CLI adapter."""
+    """The only manually-triggered endpoint that invokes the GitHub CLI adapter."""
     controller: GitHubRateLimitController = app.state.github_rate_limit_controller
     try:
-        return controller.refresh(now=_current_utc_time(), fetch=fetch_github_rate_limit, tz=app_tz())
+        snapshot = controller.refresh(now=_current_utc_time(), fetch=fetch_github_rate_limit, tz=app_tz())
     except GitHubRateLimitRefreshCooldownError as exc:
         raise HTTPException(
             status_code=429,
@@ -393,6 +427,8 @@ def refresh_github_rate_limit() -> dict:
                 "retry_after_seconds": 0,
             },
         ) from exc
+    _schedule_auto_refresh_if_pending(snapshot)
+    return snapshot
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

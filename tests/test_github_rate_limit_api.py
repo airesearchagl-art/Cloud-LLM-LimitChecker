@@ -375,3 +375,47 @@ def test_response_never_contains_token_like_string_on_success(gh_client, monkeyp
 
     assert "ghp_" not in raw_text
     assert "gho_" not in raw_text
+
+
+# 追加: 自動再取得フィールドがAPIレスポンスへ含まれる（既存フィールドとの後方互換を維持）
+def test_response_includes_auto_refresh_fields_when_exhausted(gh_client, monkeypatch):
+    monkeypatch.setattr("app.main.fetch_github_rate_limit", fake_success(GRAPHQL_EXHAUSTED_PAYLOAD))
+    set_now(monkeypatch, NOW)
+
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["auto_refresh_pending"] is True
+    assert body["scheduled_reset_at"] is not None
+    assert body["next_auto_refresh_at"] is not None
+    assert body["last_auto_refresh_at"] is None
+    assert body["last_auto_refresh_error"] is None
+
+
+# 追加: 予約が発生してもリクエストが即座に完了する(タイマー登録がリクエストをブロックしない)
+def test_scheduling_auto_refresh_does_not_block_the_response(gh_client, monkeypatch):
+    import time
+
+    monkeypatch.setattr("app.main.fetch_github_rate_limit", fake_success(GRAPHQL_EXHAUSTED_PAYLOAD))
+    set_now(monkeypatch, NOW)
+
+    start = time.monotonic()
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    elapsed = time.monotonic() - start
+
+    assert response.status_code == 200
+    assert elapsed < 2.0
+
+
+# 追加: Normalではauto_refresh_pendingがFalseのまま(後方互換確認)
+def test_response_auto_refresh_pending_false_when_normal(gh_client, monkeypatch):
+    monkeypatch.setattr("app.main.fetch_github_rate_limit", fake_success(VALID_PAYLOAD))
+    set_now(monkeypatch, NOW)
+
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    body = response.json()
+
+    assert body["auto_refresh_pending"] is False
+    assert body["scheduled_reset_at"] is None
+    assert body["next_auto_refresh_at"] is None
