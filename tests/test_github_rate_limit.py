@@ -448,3 +448,65 @@ def test_bool_values_are_rejected_as_error(field):
     raw[field] = True if field != "used" else False
     r = build_resource_rate_limit("core", raw, now=NOW)
     assert r.status == "Error"
+
+
+def test_seconds_until_reset_is_zero_one_microsecond_before_reset():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    now = reset_at - timedelta(microseconds=1)
+    r = build_resource_rate_limit(
+        "core", resource(remaining=100, reset=int(reset_at.timestamp())), now=now
+    )
+    assert r.seconds_until_reset == 0
+
+
+def test_seconds_until_reset_is_zero_at_exact_reset_match():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=reset_at
+    )
+    assert r.status == "Exhausted"
+    assert r.seconds_until_reset == 0
+
+
+def test_seconds_until_reset_is_minus_one_one_microsecond_after_reset():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    now = reset_at + timedelta(microseconds=1)
+    r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=now
+    )
+    assert r.status == "Reset overdue"
+    assert r.seconds_until_reset == -1
+
+
+def test_reset_overdue_seconds_until_reset_is_always_negative():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    for delta in (timedelta(microseconds=1), timedelta(seconds=1), timedelta(days=1)):
+        now = reset_at + delta
+        r = build_resource_rate_limit(
+            "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=now
+        )
+        assert r.status == "Reset overdue"
+        assert r.seconds_until_reset < 0
+
+
+def test_seconds_until_reset_boundary_holds_under_jst_now():
+    reset_at = datetime(2026, 7, 26, 12, 0, 0, tzinfo=timezone.utc)
+    tokyo = ZoneInfo("Asia/Tokyo")
+
+    just_before = (reset_at - timedelta(microseconds=1)).astimezone(tokyo)
+    exact_match = reset_at.astimezone(tokyo)
+    just_after = (reset_at + timedelta(microseconds=1)).astimezone(tokyo)
+
+    before_r = build_resource_rate_limit(
+        "core", resource(remaining=100, reset=int(reset_at.timestamp())), now=just_before
+    )
+    exact_r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=exact_match
+    )
+    after_r = build_resource_rate_limit(
+        "core", resource(remaining=0, reset=int(reset_at.timestamp())), now=just_after
+    )
+
+    assert before_r.seconds_until_reset == 0
+    assert exact_r.seconds_until_reset == 0
+    assert after_r.seconds_until_reset == -1

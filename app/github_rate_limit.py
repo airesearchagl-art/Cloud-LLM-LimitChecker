@@ -19,6 +19,7 @@ Design notes:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 from typing import Literal
@@ -147,8 +148,13 @@ def build_resource_rate_limit(
     `collected_at` out of `raw`, since real GitHub API responses have no such
     field.
 
-    `seconds_until_reset` keeps its sign: negative means reset time has
-    already passed (status "Reset overdue").
+    `seconds_until_reset` is `floor((reset_at_utc - normalized_now).total_seconds())`,
+    computed from the same aware datetimes used for the status boundary, not
+    from truncated epoch seconds. This keeps the two in agreement at
+    sub-second boundaries: 1 microsecond before reset is 0 (not yet
+    overdue), an exact match is 0 ("Exhausted"), and 1 microsecond after
+    reset is -1 — so whenever status is "Reset overdue", the value is always
+    strictly negative, never 0.
     """
     _require_aware(now)
     normalized_now = now.astimezone(timezone.utc)
@@ -167,7 +173,6 @@ def build_resource_rate_limit(
         return _error_resource(resource, normalized_now, "reset timestamp is out of range")
 
     reset_at_local = reset_at_utc.astimezone(tz)
-    now_epoch = int(now.timestamp())
 
     # Compare aware datetimes directly rather than truncated epoch seconds,
     # so a reset overrun of less than one second is still "Reset overdue".
@@ -177,6 +182,8 @@ def build_resource_rate_limit(
         status = "Warning"
     else:
         status = "Normal"
+
+    seconds_until_reset = math.floor((reset_at_utc - normalized_now).total_seconds())
 
     return ResourceRateLimit(
         resource=resource,
@@ -188,7 +195,7 @@ def build_resource_rate_limit(
         remaining_percent=remaining / limit * 100,
         reset_at_utc=reset_at_utc,
         reset_at_local=reset_at_local,
-        seconds_until_reset=reset_epoch - now_epoch,
+        seconds_until_reset=seconds_until_reset,
         collected_at=normalized_now,
         error_message=None,
     )
