@@ -1,8 +1,8 @@
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: Arial, "Hiragino Sans", "Yu Gothic", sans-serif;
-  background: #f4f6f7;
-  color: #182126;
+  background: #0f1419;
+  color: #e6edf3;
 }
 
 * {
@@ -16,18 +16,22 @@ body {
 
 .compact-header {
   align-items: center;
-  background: #17323a;
-  color: white;
+  background: #132028;
+  border-bottom: 1px solid #2a3540;
+  color: #e6edf3;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 6px 10px;
 }
 
 .compact-header h1 {
-  font-size: 15px;
+  font-size: 13px;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .compact-header-meta {
@@ -37,20 +41,20 @@ body {
 }
 
 .compact-last-rendered {
-  color: #d7e4e8;
-  font-size: 11px;
+  color: #9fb0bf;
+  font-size: 10px;
   white-space: nowrap;
 }
 
 .compact-reload {
   background: #1f6673;
-  border: 1px solid #1f6673;
-  border-radius: 6px;
-  color: white;
+  border: 1px solid #2c8298;
+  border-radius: 5px;
+  color: #e6edf3;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  padding: 4px 8px;
+  padding: 3px 7px;
 }
 
 .compact-reload:hover {
@@ -59,13 +63,16 @@ body {
 
 .compact-main {
   margin: 0 auto;
-  max-width: 900px;
-  padding: 10px;
+  max-width: 1600px;
+  padding: 8px 10px;
 }
 
 .compact-section-title {
-  font-size: 13px;
-  margin: 16px 0 8px;
+  color: #9fb0bf;
+  font-size: 11px;
+  font-weight: 700;
+  margin: 10px 0 6px;
+  text-transform: uppercase;
 }
 
 .compact-grid,
@@ -75,118 +82,145 @@ body {
   grid-template-columns: 1fr;
 }
 
-@media (min-width: 450px) {
+@media (min-width: 700px) {
   .compact-grid,
   .compact-github-grid-inner {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1100px) {
+  .compact-grid,
+  .compact-github-grid-inner {
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
 .compact-card {
-  background: white;
-  border: 1px solid #d9e1e5;
-  border-radius: 8px;
+  background: #1d2730;
+  border: 1px solid #2a3540;
+  border-radius: 6px;
   min-width: 0;
   overflow-wrap: anywhere;
-  padding: 10px;
+  padding: 8px;
+}
+
+.compact-github-card {
+  padding: 7px 8px;
 }
 
 .compact-empty {
-  color: #596970;
-  font-size: 12px;
+  color: #9fb0bf;
+  font-size: 11px;
 }
 
 .compact-card-head {
   align-items: flex-start;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   justify-content: space-between;
   min-width: 0;
 }
 
+.compact-card-head-text {
+  min-width: 0;
+}
+
 .compact-service-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
 .compact-model-name {
-  color: #5f6f77;
-  font-size: 11px;
+  color: #9fb0bf;
+  font-size: 10px;
   overflow-wrap: anywhere;
 }
 
 .compact-status {
   border-radius: 999px;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
-  padding: 3px 7px;
+  padding: 2px 6px;
   white-space: nowrap;
 }
 
 .compact-status-normal {
-  background: #dcefe4;
-  color: #145a35;
+  background: #123324;
+  border: 1px solid #1f5b43;
+  color: #4ade80;
 }
 
 .compact-status-warning {
-  background: #fff1bd;
-  color: #745400;
+  background: #362a0c;
+  border: 1px solid #6b5417;
+  color: #facc15;
 }
 
 .compact-status-exhausted {
-  background: #ffd7d7;
-  color: #9d1919;
+  background: #3a1414;
+  border: 1px solid #6b2020;
+  color: #ff6b6b;
+}
+
+.compact-status-error {
+  background: #3a2410;
+  border: 1px solid #6b4820;
+  color: #ffa94d;
 }
 
 .compact-status-unknown {
-  background: #e6eaed;
-  color: #46545c;
+  background: #232d36;
+  border: 1px solid #2a3540;
+  color: #9fb0bf;
 }
 
 .compact-percent-row {
-  margin: 8px 0 4px;
-}
-
-.compact-percent-main {
   align-items: baseline;
   display: flex;
-  gap: 6px;
+  gap: 5px;
+  margin: 5px 0 2px;
 }
 
 .compact-percent-label {
-  color: #5f6f77;
-  font-size: 11px;
+  color: #9fb0bf;
+  font-size: 10px;
 }
 
 .compact-percent-value {
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   line-height: 1;
 }
 
-.compact-percent-sub {
-  color: #5f6f77;
-  font-size: 11px;
-  margin-top: 2px;
+.compact-percent-value-sm {
+  font-size: 18px;
+}
+
+.compact-usage-line {
+  color: #9fb0bf;
+  font-size: 10px;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
 }
 
 .compact-no-limit {
-  background: #f1f3f4;
-  border: 1px dashed #b9c3c9;
-  border-radius: 6px;
-  color: #4d5b63;
-  font-size: 11px;
+  background: #232d36;
+  border: 1px dashed #3a4753;
+  border-radius: 5px;
+  color: #9fb0bf;
+  font-size: 10px;
   font-weight: 700;
-  margin: 8px 0;
-  padding: 6px 8px;
+  margin: 5px 0;
+  padding: 4px 7px;
 }
 
 .compact-meter {
-  background: #e7edf0;
+  background: #232d36;
   border-radius: 999px;
-  height: 8px;
+  height: 6px;
   overflow: hidden;
 }
 
@@ -195,48 +229,46 @@ body {
 }
 
 .compact-meter-fill.compact-status-normal {
-  background: #2f8b57;
+  background: #34d399;
 }
 
 .compact-meter-fill.compact-status-warning {
-  background: #d9a514;
+  background: #eab308;
 }
 
 .compact-meter-fill.compact-status-exhausted {
-  background: #c62828;
+  background: #ef4444;
+}
+
+.compact-meter-fill.compact-status-error {
+  background: #f97316;
 }
 
 .compact-meter-fill.compact-status-unknown {
-  background: #9aa7ad;
+  background: #4b5865;
 }
 
-.compact-detail-row {
-  color: #46545c;
-  font-size: 11px;
-  margin-top: 6px;
-  overflow-wrap: anywhere;
-}
-
-.compact-footer-row {
-  align-items: center;
-  border-top: 1px solid #edf1f3;
+.compact-meta-row {
+  border-top: 1px solid #2a3540;
+  color: #768692;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  justify-content: space-between;
-  margin-top: 8px;
-  padding-top: 6px;
+  font-size: 9px;
+  gap: 4px 8px;
+  margin-top: 6px;
+  padding-top: 5px;
 }
 
 .compact-source-badge {
-  background: #eef3f1;
-  border: 1px solid #d5dfda;
+  background: #1a2933;
+  border: 1px solid #2a3540;
   border-radius: 999px;
-  color: #3f5d4f;
+  color: #9fb0bf;
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 700;
-  padding: 3px 7px;
+  margin-left: auto;
+  padding: 2px 6px;
   white-space: nowrap;
 }
 
@@ -246,14 +278,14 @@ body {
 }
 
 .compact-github-overall {
-  border-radius: 8px;
-  font-size: 12px;
+  border-radius: 6px;
+  font-size: 11px;
   font-weight: 700;
   overflow-wrap: anywhere;
-  padding: 8px 10px;
+  padding: 5px 8px;
 }
 
 .compact-stale-notice {
-  color: #62717a;
-  font-size: 11px;
+  color: #768692;
+  font-size: 10px;
 }

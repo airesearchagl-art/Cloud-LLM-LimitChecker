@@ -72,10 +72,12 @@ function githubSecondsUntilResetText(seconds) {
   return `あと${Math.floor(seconds / 3600)}時間`;
 }
 
+// Error(取得失敗)はUnknown/未取得(灰)とは別に、赤系との識別のため濃い橙で区別する。
 function githubStatusClass(status) {
   if (status === "Normal") return "compact-status-normal";
   if (status === "Warning") return "compact-status-warning";
   if (status === "Exhausted" || status === "Reset overdue" || status === "Limited") return "compact-status-exhausted";
+  if (status === "Error") return "compact-status-error";
   return "compact-status-unknown";
 }
 
@@ -84,91 +86,106 @@ function githubResourceLabel(resourceName) {
   return labels[resourceName] || resourceName;
 }
 
+// 監視優先度: Exhausted/Limited/Error(赤・橙) > Warning(黄) > Normal(緑) > 手入力待ち/未取得(灰)。
+function statusPriorityRank(statusClass) {
+  const order = {
+    "compact-status-exhausted": 0,
+    "compact-status-error": 0,
+    "compact-status-warning": 1,
+    "compact-status-normal": 2,
+    "compact-status-unknown": 3,
+  };
+  return order[statusClass] ?? 4;
+}
+
+// DOMに触れない純粋関数: 監視優先度→service名→model名の順で決定的に並び替える。
+// 元の配列順や取得タイミングに依存しないため、30秒ごとの再取得でも同一データなら同一順序になる。
+function sortDashboardRows(rows) {
+  return [...rows].sort((a, b) => {
+    const rankDiff = statusPriorityRank(dashboardStatusClass(a.status)) - statusPriorityRank(dashboardStatusClass(b.status));
+    if (rankDiff !== 0) return rankDiff;
+    const nameA = `${a.service_name} ${a.model_name}`;
+    const nameB = `${b.service_name} ${b.model_name}`;
+    return nameA.localeCompare(nameB, "ja");
+  });
+}
+
 // DOMに触れない純粋関数: dashboard 1件分のカードHTMLを組み立てる。
+// 優先順位: 残り% > status(ヘッダーバッジ) > 使用量/上限 > resetまで > 最終更新 > 取得元。
 function limitCardHtml(row) {
-  const hasMax = row.max_value !== null && row.max_value !== undefined;
   const hasPercent = row.usage_percent !== null && row.usage_percent !== undefined;
-  const usedPercent = hasPercent ? row.usage_percent : null;
-  const remainingPercent = hasPercent ? Math.max(0, Math.round((100 - usedPercent) * 100) / 100) : null;
-  const width = hasPercent ? Math.min(Math.max(usedPercent, 0), 100) : 0;
   const statusClass = dashboardStatusClass(row.status);
 
-  const percentBlock = hasPercent
-    ? `
-      <div class="compact-percent-row">
-        <div class="compact-percent-main">
-          <span class="compact-percent-label">残り</span>
-          <span class="compact-percent-value">${fmtNumber(remainingPercent)}%</span>
-        </div>
-        <div class="compact-percent-sub">使用済み ${fmtNumber(usedPercent)}%</div>
-      </div>
-      <div class="compact-meter"><div class="compact-meter-fill ${statusClass}" style="width:${width}%"></div></div>
-    `
+  const bodyBlock = hasPercent
+    ? (() => {
+        const remainingPercent = Math.max(0, Math.round((100 - row.usage_percent) * 100) / 100);
+        const width = Math.min(Math.max(row.usage_percent, 0), 100);
+        return `
+          <div class="compact-percent-row">
+            <span class="compact-percent-label">残り</span>
+            <span class="compact-percent-value">${fmtNumber(remainingPercent)}%</span>
+          </div>
+          <div class="compact-usage-line">使用 ${fmtNumber(row.used_value)} / ${fmtNumber(row.max_value)} ${escapeHtml(row.unit)}（${fmtNumber(row.usage_percent)}%）</div>
+          <div class="compact-meter"><div class="compact-meter-fill ${statusClass}" style="width:${width}%"></div></div>
+        `;
+      })()
     : `<div class="compact-no-limit">上限未登録</div>`;
-
-  const remainingLine = hasMax
-    ? `${fmtNumber(row.remaining_value)} / ${fmtNumber(row.max_value)} ${escapeHtml(row.unit)}`
-    : "上限未登録";
 
   return `
     <article class="compact-card">
       <div class="compact-card-head">
-        <div>
+        <div class="compact-card-head-text">
           <div class="compact-service-name">${escapeHtml(row.service_name)}</div>
           <div class="compact-model-name">${escapeHtml(row.model_name)}</div>
         </div>
         <span class="compact-status ${statusClass}">${escapeHtml(row.status)}</span>
       </div>
-      ${percentBlock}
-      <div class="compact-detail-row">${remainingLine}</div>
-      <div class="compact-detail-row">reset: ${resetRelativeText(row.next_reset_at)}</div>
-      <div class="compact-footer-row">
-        <span class="compact-detail-row" style="margin-top:0">最終更新: ${fmtDateOrUnknown(row.last_updated_at)}</span>
+      ${bodyBlock}
+      <div class="compact-meta-row">
+        <span>reset: ${resetRelativeText(row.next_reset_at)}</span>
+        <span>更新: ${fmtDateOrUnknown(row.last_updated_at)}</span>
         <span class="compact-source-badge">${escapeHtml(sourceTypeLabel(row.source_type))}</span>
       </div>
     </article>
   `;
 }
 
-// DOMに触れない純粋関数: GitHubの1リソース分のカードHTMLを組み立てる。
+// DOMに触れない純粋関数: GitHubの1リソース分のカードHTMLを組み立てる。UTC詳細は表示しない。
 function githubResourceCardHtml(resource) {
   if (!resource) return "";
   const statusClass = githubStatusClass(resource.status);
   if (resource.status === "Error") {
     return `
-      <article class="compact-card">
+      <article class="compact-card compact-github-card">
         <div class="compact-card-head">
-          <div class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</div>
+          <span class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</span>
           <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
         </div>
-        <div class="compact-detail-row">${escapeHtml(resource.error_message || "")}</div>
+        <div class="compact-usage-line">${escapeHtml(resource.error_message || "")}</div>
       </article>`;
   }
 
   const hasPercent = resource.remaining_percent !== null && resource.remaining_percent !== undefined;
   const width = Math.min(Math.max(resource.usage_percent ?? 0, 0), 100);
-  const percentBlock = hasPercent
+  const bodyBlock = hasPercent
     ? `
       <div class="compact-percent-row">
-        <div class="compact-percent-main">
-          <span class="compact-percent-label">残り</span>
-          <span class="compact-percent-value">${fmtNumber(resource.remaining_percent)}%</span>
-        </div>
-        <div class="compact-percent-sub">使用済み ${fmtNumber(resource.usage_percent)}%</div>
+        <span class="compact-percent-label">残り</span>
+        <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(resource.remaining_percent)}%</span>
       </div>
+      <div class="compact-usage-line">${fmtNumber(resource.used)} / ${fmtNumber(resource.limit)}</div>
       <div class="compact-meter"><div class="compact-meter-fill ${statusClass}" style="width:${width}%"></div></div>
     `
     : `<div class="compact-no-limit">上限未登録</div>`;
 
   return `
-    <article class="compact-card">
+    <article class="compact-card compact-github-card">
       <div class="compact-card-head">
-        <div class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</div>
+        <span class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</span>
         <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
       </div>
-      ${percentBlock}
-      <div class="compact-detail-row">${fmtNumber(resource.remaining)} / ${fmtNumber(resource.limit)}</div>
-      <div class="compact-detail-row">reset: ${githubSecondsUntilResetText(resource.seconds_until_reset)}</div>
+      ${bodyBlock}
+      <div class="compact-meta-row"><span>reset: ${githubSecondsUntilResetText(resource.seconds_until_reset)}</span></div>
     </article>
   `;
 }
@@ -177,6 +194,7 @@ function githubOverallStatusClass(status) {
   if (status === "Normal") return "compact-status-normal";
   if (status === "Warning") return "compact-status-warning";
   if (status === "Limited") return "compact-status-exhausted";
+  if (status === "Error") return "compact-status-error";
   return "compact-status-unknown";
 }
 
@@ -184,10 +202,11 @@ function githubOverallHtml(overall) {
   if (!overall) return "";
   const cls = githubOverallStatusClass(overall.status);
   const reason = overall.reason ? ` — ${escapeHtml(overall.reason)}` : "";
-  return `<div class="compact-github-overall ${cls}">Overall: ${escapeHtml(overall.status)}${reason}</div>`;
+  return `<div class="compact-github-overall ${cls}">GitHub Overall: ${escapeHtml(overall.status)}${reason}</div>`;
 }
 
 // DOMに触れない純粋関数: GET /api/github-rate-limit のレスポンスからGitHubセクションのHTMLを組み立てる。
+// REST/GraphQL/Searchは固定順(状態による並び替えをしない)で常に横並び表示する。
 function githubSectionHtml(data) {
   if (!data || !data.fetched) {
     const usingLastKnown = data && !data.fetched && data.last_known;
@@ -221,8 +240,9 @@ function renderLastRendered() {
 
 function renderLimitCards(rows) {
   const container = document.querySelector("#limitCards");
-  container.innerHTML = rows.length
-    ? rows.map(limitCardHtml).join("")
+  const sorted = sortDashboardRows(rows);
+  container.innerHTML = sorted.length
+    ? sorted.map(limitCardHtml).join("")
     : `<div class="compact-card compact-empty">表示できる制限項目がありません。</div>`;
 }
 
@@ -268,6 +288,8 @@ if (typeof module !== "undefined") {
     githubSecondsUntilResetText,
     githubStatusClass,
     githubResourceLabel,
+    statusPriorityRank,
+    sortDashboardRows,
     limitCardHtml,
     githubResourceCardHtml,
     githubOverallHtml,
