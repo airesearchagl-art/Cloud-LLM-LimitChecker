@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -467,6 +467,12 @@ def refresh_github_rate_limit() -> dict:
         ) from exc
     _schedule_auto_refresh_if_pending(snapshot)
     return snapshot
+
+
+@app.get("/compact", include_in_schema=False)
+def compact_dashboard() -> FileResponse:
+    """Read-only compact dashboard. Serves static HTML only, never triggers a fetch."""
+    return FileResponse("static/compact.html")
 
 
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

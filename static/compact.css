@@ -1,0 +1,259 @@
+:root {
+  color-scheme: light;
+  font-family: Arial, "Hiragino Sans", "Yu Gothic", sans-serif;
+  background: #f4f6f7;
+  color: #182126;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow-x: hidden;
+}
+
+.compact-header {
+  align-items: center;
+  background: #17323a;
+  color: white;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.compact-header h1 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.compact-header-meta {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
+.compact-last-rendered {
+  color: #d7e4e8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.compact-reload {
+  background: #1f6673;
+  border: 1px solid #1f6673;
+  border-radius: 6px;
+  color: white;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 8px;
+}
+
+.compact-reload:hover {
+  background: #195762;
+}
+
+.compact-main {
+  margin: 0 auto;
+  max-width: 900px;
+  padding: 10px;
+}
+
+.compact-section-title {
+  font-size: 13px;
+  margin: 16px 0 8px;
+}
+
+.compact-grid,
+.compact-github-grid-inner {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 450px) {
+  .compact-grid,
+  .compact-github-grid-inner {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.compact-card {
+  background: white;
+  border: 1px solid #d9e1e5;
+  border-radius: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding: 10px;
+}
+
+.compact-empty {
+  color: #596970;
+  font-size: 12px;
+}
+
+.compact-card-head {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.compact-service-name {
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.compact-model-name {
+  color: #5f6f77;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.compact-status {
+  border-radius: 999px;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+
+.compact-status-normal {
+  background: #dcefe4;
+  color: #145a35;
+}
+
+.compact-status-warning {
+  background: #fff1bd;
+  color: #745400;
+}
+
+.compact-status-exhausted {
+  background: #ffd7d7;
+  color: #9d1919;
+}
+
+.compact-status-unknown {
+  background: #e6eaed;
+  color: #46545c;
+}
+
+.compact-percent-row {
+  margin: 8px 0 4px;
+}
+
+.compact-percent-main {
+  align-items: baseline;
+  display: flex;
+  gap: 6px;
+}
+
+.compact-percent-label {
+  color: #5f6f77;
+  font-size: 11px;
+}
+
+.compact-percent-value {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.compact-percent-sub {
+  color: #5f6f77;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.compact-no-limit {
+  background: #f1f3f4;
+  border: 1px dashed #b9c3c9;
+  border-radius: 6px;
+  color: #4d5b63;
+  font-size: 11px;
+  font-weight: 700;
+  margin: 8px 0;
+  padding: 6px 8px;
+}
+
+.compact-meter {
+  background: #e7edf0;
+  border-radius: 999px;
+  height: 8px;
+  overflow: hidden;
+}
+
+.compact-meter-fill {
+  height: 100%;
+}
+
+.compact-meter-fill.compact-status-normal {
+  background: #2f8b57;
+}
+
+.compact-meter-fill.compact-status-warning {
+  background: #d9a514;
+}
+
+.compact-meter-fill.compact-status-exhausted {
+  background: #c62828;
+}
+
+.compact-meter-fill.compact-status-unknown {
+  background: #9aa7ad;
+}
+
+.compact-detail-row {
+  color: #46545c;
+  font-size: 11px;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+
+.compact-footer-row {
+  align-items: center;
+  border-top: 1px solid #edf1f3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 6px;
+}
+
+.compact-source-badge {
+  background: #eef3f1;
+  border: 1px solid #d5dfda;
+  border-radius: 999px;
+  color: #3f5d4f;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+
+.compact-github-area {
+  display: grid;
+  gap: 8px;
+}
+
+.compact-github-overall {
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.compact-stale-notice {
+  color: #62717a;
+  font-size: 11px;
+}
