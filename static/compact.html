@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI / API Usage Monitor</title>
+    <link rel="stylesheet" href="/compact.css" />
+  </head>
+  <body>
+    <header class="compact-header">
+      <h1>AI / API Usage Monitor</h1>
+      <div class="compact-header-meta">
+        <span id="lastRenderedAt" class="compact-last-rendered">最終描画: -</span>
+        <button id="reloadButton" type="button" class="compact-reload">再読込</button>
+      </div>
+    </header>
+
+    <main class="compact-main">
+      <section>
+        <div id="limitCards" class="compact-grid"></div>
+      </section>
+
+      <section>
+        <h2 class="compact-section-title">GitHub API Rate Limit</h2>
+        <div id="githubCards" class="compact-github-area"></div>
+      </section>
+    </main>
+
+    <script src="/compact.js"></script>
+  </body>
+</html>
