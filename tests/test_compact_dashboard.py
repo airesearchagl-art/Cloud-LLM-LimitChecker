@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -346,9 +347,68 @@ def test_compact_page_load_endpoints_never_call_gh(monkeypatch: pytest.MonkeyPat
         assert client.get("/compact").status_code == 200
         assert client.get("/api/dashboard").status_code == 200
         assert client.get("/api/github-rate-limit").status_code == 200
+        assert client.get("/api/claude-code-usage").status_code == 200
 
 
 # GitHub未取得表示
 def test_github_section_unfetched_shows_not_fetched_message() -> None:
     html = run_compact_js("compact.githubSectionHtml({fetched: false, last_known: null})")
     assert "未取得" in html
+
+
+CLAUDE_USAGE_AVAILABLE = {
+    "available": True,
+    "stale": False,
+    "status": "ok",
+    "observed_at": "2026-01-01T12:00:00+00:00",
+    "source": "claude_code_statusline",
+    "five_hour": {"used_percentage": 42.0, "remaining_percentage": 58.0, "resets_at": "2999-01-01T00:00:00+00:00"},
+    "seven_day": {"used_percentage": 18.0, "remaining_percentage": 82.0, "resets_at": "2999-01-07T00:00:00+00:00"},
+    "error_message": None,
+}
+
+
+# 24. /compactで5時間・7日を表示
+def test_claude_code_section_shows_five_hour_and_seven_day() -> None:
+    html = run_compact_js(f"compact.claudeCodeSectionHtml({json.dumps(CLAUDE_USAGE_AVAILABLE)})")
+    assert "5時間枠" in html
+    assert "7日枠" in html
+    assert "58%" in html  # 5h remaining
+    assert "42%" in html  # 5h used
+    assert "82%" in html  # 7d remaining
+    assert "18%" in html  # 7d used
+
+
+# 24b. 片方欠落時はその枠だけ「未観測」
+def test_claude_code_section_shows_partial_window_as_unobserved() -> None:
+    data = {**CLAUDE_USAGE_AVAILABLE, "seven_day": None}
+    html = run_compact_js(f"compact.claudeCodeSectionHtml({json.dumps(data)})")
+    assert "5時間枠" in html
+    assert "42%" in html
+    assert "未観測" in html
+
+
+# 25. stale表示
+def test_claude_code_section_shows_stale_notice() -> None:
+    data = {**CLAUDE_USAGE_AVAILABLE, "stale": True, "status": "stale"}
+    html = run_compact_js(f"compact.claudeCodeSectionHtml({json.dumps(data)})")
+    assert "最終観測" in html
+
+
+# 26. 未観測表示
+def test_claude_code_section_not_observed_shows_guidance_message() -> None:
+    html = run_compact_js(
+        'compact.claudeCodeSectionHtml({available: false, status: "not_observed"})'
+    )
+    assert "Claude Code実行後に取得" in html
+
+    invalid_html = run_compact_js('compact.claudeCodeSectionHtml({available: false, status: "invalid_cache"})')
+    assert "取得不可" in invalid_html
+
+
+# 27. reset超過で負数を出さない
+def test_claude_usage_window_reset_overdue_shows_no_negative_number() -> None:
+    window = {"used_percentage": 90.0, "remaining_percentage": 10.0, "resets_at": "2000-01-01T00:00:00+00:00"}
+    html = run_compact_js(f'compact.claudeUsageWindowHtml({json.dumps("5時間枠")}, {json.dumps(window)})')
+    assert "reset時刻超過" in html
+    assert not re.search(r"-\d", html)

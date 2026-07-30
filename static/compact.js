@@ -3,6 +3,7 @@ const REFRESH_INTERVAL_MS = 30000;
 const state = {
   dashboard: [],
   github: null,
+  claudeCodeUsage: null,
 };
 
 async function fetchJson(path) {
@@ -234,6 +235,52 @@ function githubSectionHtml(data) {
     </div>`;
 }
 
+// DOMに触れない純粋関数: Claude Code statusLineブリッジのキャッシュ1枠分(5時間 or 7日)のカードHTMLを組み立てる。
+// remaining/usedはブリッジ側で既に0-100%へ検証済みの値のみを渡される想定。
+function claudeUsageWindowHtml(label, window) {
+  if (!window) {
+    return `
+      <article class="compact-card">
+        <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
+        <div class="compact-no-limit">未観測</div>
+      </article>`;
+  }
+  const width = Math.min(Math.max(window.used_percentage, 0), 100);
+  return `
+    <article class="compact-card">
+      <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
+      <div class="compact-percent-row">
+        <span class="compact-percent-label">残り</span>
+        <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(window.remaining_percentage)}%</span>
+      </div>
+      <div class="compact-usage-line">使用済み ${fmtNumber(window.used_percentage)}%</div>
+      <div class="compact-meter"><div class="compact-meter-fill compact-claude-usage" style="width:${width}%"></div></div>
+      <div class="compact-meta-row"><span>reset: ${resetRelativeText(window.resets_at)}</span></div>
+    </article>`;
+}
+
+// DOMに触れない純粋関数: GET /api/claude-code-usage のレスポンスからセクションHTMLを組み立てる。
+// statusLineはpush型のため、staleは「取得不可」ではなく「最終観測値が古い」という意味で表示する。
+function claudeCodeSectionHtml(data) {
+  if (!data || !data.available) {
+    const message = data && data.status === "invalid_cache" ? "取得不可" : "Claude Code実行後に取得";
+    return `<div class="compact-card compact-empty">Claude Code使用率: ${message}</div>`;
+  }
+
+  const staleNoticeHtml = data.stale
+    ? `<div class="compact-stale-notice">最終観測値(古い可能性があります)</div>`
+    : "";
+
+  return `
+    ${staleNoticeHtml}
+    <div class="compact-github-grid-inner">
+      ${claudeUsageWindowHtml("5時間枠", data.five_hour)}
+      ${claudeUsageWindowHtml("7日枠", data.seven_day)}
+    </div>
+    <div class="compact-stale-notice">最終観測: ${fmtDateOrUnknown(data.observed_at)}</div>
+  `;
+}
+
 function renderLastRendered() {
   document.querySelector("#lastRenderedAt").textContent = `最終描画: ${new Date().toLocaleString("ja-JP")}`;
 }
@@ -250,15 +297,25 @@ function renderGithubSection(data) {
   document.querySelector("#githubCards").innerHTML = githubSectionHtml(data);
 }
 
-// GETのみ: /api/dashboard と /api/github-rate-limit はどちらも保存済みの値を返すだけで、
-// gh api rate_limit などの外部コマンド/APIをここから直接実行することはない。
+function renderClaudeCodeUsage(data) {
+  document.querySelector("#claudeCodeUsageCards").innerHTML = claudeCodeSectionHtml(data);
+}
+
+// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage はいずれも保存済みの値を
+// 返すだけで、gh api rate_limitやClaude Codeの起動などの外部コマンド/APIをここから直接実行することはない。
 async function loadCompact() {
   try {
-    const [dashboard, github] = await Promise.all([fetchJson("/api/dashboard"), fetchJson("/api/github-rate-limit")]);
+    const [dashboard, github, claudeCodeUsage] = await Promise.all([
+      fetchJson("/api/dashboard"),
+      fetchJson("/api/github-rate-limit"),
+      fetchJson("/api/claude-code-usage"),
+    ]);
     state.dashboard = dashboard;
     state.github = github;
+    state.claudeCodeUsage = claudeCodeUsage;
     renderLimitCards(dashboard);
     renderGithubSection(github);
+    renderClaudeCodeUsage(claudeCodeUsage);
   } catch (error) {
     document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
   } finally {
@@ -295,5 +352,7 @@ if (typeof module !== "undefined") {
     githubOverallHtml,
     githubOverallStatusClass,
     githubSectionHtml,
+    claudeUsageWindowHtml,
+    claudeCodeSectionHtml,
   };
 }
