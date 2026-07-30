@@ -33,6 +33,7 @@ from app.claude_code_usage_cache import (  # noqa: E402
     SCHEMA_VERSION,
     SOURCE_NAME,
     resolve_cache_path,
+    validate_cache_record,
     write_cache_atomic,
 )
 
@@ -113,11 +114,23 @@ def main(*, stdin: TextIO | None = None, now: datetime | None = None, cache_path
 
     record = extract_usage_record(payload, now=current_time)
 
+    # Belt-and-suspenders: `extract_usage_record` should already only ever produce a
+    # schema-valid record, but route it through the same validator `load_snapshot()`
+    # uses before persisting anything, so a future bug here can never write a record
+    # that would later be rejected as invalid_cache on read. The status line printed
+    # below always reflects `record` (best-effort), never the validated copy — a
+    # validation failure here should never suppress the status line itself.
     try:
-        write_cache_atomic(record, cache_path if cache_path is not None else resolve_cache_path())
+        validated_record = validate_cache_record(record, now=current_time)
     except Exception:
-        # Fail-open: the status line must still render even if the cache write fails.
-        pass
+        validated_record = None
+
+    if validated_record is not None:
+        try:
+            write_cache_atomic(validated_record, cache_path if cache_path is not None else resolve_cache_path())
+        except Exception:
+            # Fail-open: the status line must still render even if the cache write fails.
+            pass
 
     print(format_status_line(record))
     return 0

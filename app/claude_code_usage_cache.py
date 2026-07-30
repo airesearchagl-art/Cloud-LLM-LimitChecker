@@ -29,6 +29,16 @@ SOURCE_NAME = "claude_code_statusline"
 # "unavailable" the way GitHub CLI's fetch failures do.
 STALE_THRESHOLD_SECONDS = 15 * 60
 
+# `observed_at` is supposed to be "roughly now" at write time. A little future
+# skew is tolerated (clock drift between whatever process wrote the cache and
+# whatever process reads it); anything further out is treated as corrupt data
+# rather than displayed as a fresh-looking future observation.
+MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS = 5 * 60
+
+# used_percentage + remaining_percentage must sum to ~100; this only allows for
+# float rounding, not for genuinely inconsistent data.
+PERCENTAGE_SUM_TOLERANCE = 0.5
+
 _CACHE_DIR_NAME = "Cloud-LLM-LimitChecker"
 _CACHE_FILE_NAME = "claude-code-usage.json"
 
@@ -37,6 +47,8 @@ STATUS_INVALID_CACHE = "invalid_cache"
 STATUS_OK = "ok"
 STATUS_STALE = "stale"
 
+_INVALID_CACHE_ERROR_MESSAGE = "usage cache could not be read"
+
 _EMPTY_SNAPSHOT_BASE = {
     "observed_at": None,
     "source": None,
@@ -44,6 +56,93 @@ _EMPTY_SNAPSHOT_BASE = {
     "seven_day": None,
     "error_message": None,
 }
+
+
+class CacheValidationError(ValueError):
+    """Raised by `validate_cache_record` when a record doesn't conform to the documented schema."""
+
+
+def _parse_aware_utc_datetime(value: object) -> datetime | None:
+    """Parse an ISO datetime string, rejecting anything that isn't timezone-aware.
+
+    Naive datetimes are never assumed to be UTC (or any other zone) — they're
+    rejected outright, since guessing would silently paper over a corrupt or
+    hand-edited cache file.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _validate_window(raw: object) -> dict | None:
+    """Validate one rate-limit window (`five_hour` / `seven_day`). `None` is a valid, expected value."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise CacheValidationError("window is not an object")
+
+    used = raw.get("used_percentage")
+    if isinstance(used, bool) or not isinstance(used, (int, float)):
+        raise CacheValidationError("used_percentage is not a number")
+    if not (0 <= used <= 100):
+        raise CacheValidationError("used_percentage out of range")
+
+    remaining = raw.get("remaining_percentage")
+    if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+        raise CacheValidationError("remaining_percentage is not a number")
+    if not (0 <= remaining <= 100):
+        raise CacheValidationError("remaining_percentage out of range")
+
+    if abs((float(used) + float(remaining)) - 100.0) > PERCENTAGE_SUM_TOLERANCE:
+        raise CacheValidationError("used_percentage and remaining_percentage are inconsistent")
+
+    resets_at = _parse_aware_utc_datetime(raw.get("resets_at"))
+    if resets_at is None:
+        raise CacheValidationError("resets_at is not a timezone-aware ISO datetime")
+
+    return {
+        "used_percentage": float(used),
+        "remaining_percentage": float(remaining),
+        "resets_at": resets_at.isoformat(),
+    }
+
+
+def validate_cache_record(record: object, *, now: datetime) -> dict:
+    """Validate a JSON-decoded cache record against the documented schema.
+
+    Used both before writing (by `app.claude_code_usage_bridge`) and before
+    reading (`load_snapshot` below), so a record can only ever reach display
+    or disk after passing the exact same checks. Raises `CacheValidationError`
+    (never anything else) on any violation; returns a normalized dict — aware
+    UTC ISO timestamps, floats — on success. Never includes any part of the
+    raw input in the exception message (no cache content, no secrets).
+    """
+    if not isinstance(record, dict):
+        raise CacheValidationError("root is not an object")
+    if record.get("schema_version") != SCHEMA_VERSION:
+        raise CacheValidationError("schema_version mismatch")
+    if record.get("source") != SOURCE_NAME:
+        raise CacheValidationError("source mismatch")
+
+    observed_at = _parse_aware_utc_datetime(record.get("observed_at"))
+    if observed_at is None:
+        raise CacheValidationError("observed_at is not a timezone-aware ISO datetime")
+    if (observed_at - now).total_seconds() > MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS:
+        raise CacheValidationError("observed_at is too far in the future")
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source": SOURCE_NAME,
+        "observed_at": observed_at.isoformat(),
+        "five_hour": _validate_window(record.get("five_hour")),
+        "seven_day": _validate_window(record.get("seven_day")),
+    }
 
 
 def resolve_cache_path(env: Mapping[str, str] | None = None) -> Path:
@@ -74,29 +173,34 @@ def write_cache_atomic(record: dict, path: Path) -> None:
         raise
 
 
+def _invalid_cache_snapshot() -> dict:
+    return {
+        "available": False,
+        "stale": False,
+        "status": STATUS_INVALID_CACHE,
+        **_EMPTY_SNAPSHOT_BASE,
+        "error_message": _INVALID_CACHE_ERROR_MESSAGE,
+    }
+
+
 def load_snapshot(*, now: datetime, path: Path | None = None) -> dict:
-    """Read-only load of the cache. Never runs Claude Code, never touches the network."""
+    """Read-only load of the cache. Never runs Claude Code, never touches the network.
+
+    Never raises: any I/O error, malformed JSON, or schema violation (checked by
+    `validate_cache_record`, not by relying on the API's response_model to catch it
+    downstream) becomes `status: invalid_cache` instead of propagating.
+    """
     cache_path = path if path is not None else resolve_cache_path()
 
-    if not cache_path.exists():
-        return {"available": False, "stale": False, "status": STATUS_NOT_OBSERVED, **_EMPTY_SNAPSHOT_BASE}
-
     try:
-        record = json.loads(cache_path.read_text(encoding="utf-8"))
-        if not isinstance(record, dict):
-            raise ValueError("cache root is not an object")
-        observed_at = datetime.fromisoformat(record["observed_at"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return {
-            "available": False,
-            "stale": False,
-            "status": STATUS_INVALID_CACHE,
-            **_EMPTY_SNAPSHOT_BASE,
-            "error_message": "usage cache could not be read",
-        }
+        if not cache_path.exists():
+            return {"available": False, "stale": False, "status": STATUS_NOT_OBSERVED, **_EMPTY_SNAPSHOT_BASE}
+        raw_record = json.loads(cache_path.read_text(encoding="utf-8"))
+        validated = validate_cache_record(raw_record, now=now)
+    except Exception:
+        return _invalid_cache_snapshot()
 
-    if observed_at.tzinfo is None:
-        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    observed_at = datetime.fromisoformat(validated["observed_at"])
     age_seconds = (now - observed_at).total_seconds()
     stale = age_seconds > STALE_THRESHOLD_SECONDS
 
@@ -104,9 +208,9 @@ def load_snapshot(*, now: datetime, path: Path | None = None) -> dict:
         "available": True,
         "stale": stale,
         "status": STATUS_STALE if stale else STATUS_OK,
-        "observed_at": observed_at.isoformat(),
-        "source": record.get("source"),
-        "five_hour": record.get("five_hour"),
-        "seven_day": record.get("seven_day"),
+        "observed_at": validated["observed_at"],
+        "source": validated["source"],
+        "five_hour": validated["five_hour"],
+        "seven_day": validated["seven_day"],
         "error_message": None,
     }
