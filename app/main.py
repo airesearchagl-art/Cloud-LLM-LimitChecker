@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, models, schemas
 from app.calculations import alert_items, limit_to_dashboard
+from app.claude_code_usage_cache import load_snapshot as load_claude_code_usage_snapshot
 from app.collectors.importer import CollectorImportError, import_normalized_records
 from app.collectors.claude_collector import (
     ClaudeCollectorConfigError,
@@ -467,6 +468,12 @@ def refresh_github_rate_limit() -> dict:
         ) from exc
     _schedule_auto_refresh_if_pending(snapshot)
     return snapshot
+
+
+@app.get("/api/claude-code-usage", response_model=schemas.ClaudeCodeUsageSnapshot)
+def get_claude_code_usage() -> dict:
+    """Read-only load of the local statusLine bridge cache. Never runs Claude Code, never calls out."""
+    return load_claude_code_usage_snapshot(now=_current_utc_time())
 
 
 @app.get("/compact", include_in_schema=False)

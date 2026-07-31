@@ -136,6 +136,23 @@ class AlertRead(BaseModel):
     next_reset_at: datetime | None
 
 
+class ClaudeCodeUsageWindow(BaseModel):
+    used_percentage: float
+    remaining_percentage: float
+    resets_at: str
+
+
+class ClaudeCodeUsageSnapshot(BaseModel):
+    available: bool
+    stale: bool
+    status: str
+    observed_at: str | None
+    source: str | None
+    five_hour: ClaudeCodeUsageWindow | None
+    seven_day: ClaudeCodeUsageWindow | None
+    error_message: str | None
+
+
 class CollectorRunRead(BaseModel):
     id: int
     vendor: str

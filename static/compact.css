@@ -248,6 +248,11 @@ body {
   background: #4b5865;
 }
 
+/* Claude Codeのrate_limitsには公式のstatus区分がないため、既存のstatus配色とは別の中立色を使う。 */
+.compact-meter-fill.compact-claude-usage {
+  background: #38bdf8;
+}
+
 .compact-meta-row {
   border-top: 1px solid #2a3540;
   color: #768692;
