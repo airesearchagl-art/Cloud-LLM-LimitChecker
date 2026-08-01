@@ -312,6 +312,35 @@ function startGithubCooldownCountdown(retryAfterSeconds) {
   githubCooldownIntervalId = setInterval(tick, 1000);
 }
 
+// The only text ever shown for a non-429 refresh failure — deliberately never
+// derived from the response body, so a backend error page/traceback/JSON-RPC
+// error text can never reach the DOM through this path.
+const CODEX_RATE_LIMITS_GENERIC_ERROR_MESSAGE = "Codex使用枠の取得に失敗しました。しばらく待ってから再度お試しください。";
+
+// DOMに触れない純粋関数: POST /api/codex-rate-limits/refresh のレスポンスから
+// 画面へ表示してよい内容だけを決定する。status以外の入力(response本文)は429の
+// 場合の`detail.user_message`/`detail.retry_after_seconds`という固定schemaの
+// 2フィールドしか読まない — それ以外は本文の中身に関わらず一切参照しない。
+// これにより、500本文にtoken風文字列・Traceback・JSON-RPC error風の文字列が
+// 含まれていても、あるいはbodyがnull(JSON parse失敗・network error)でも、
+// 返るuser_messageは常にこの2種類の固定文言のいずれかになる。
+function codexRateLimitsErrorDisplay(status, body) {
+  if (status === 429) {
+    const detail = (body && body.detail) || {};
+    const retryAfterSeconds = typeof detail.retry_after_seconds === "number" ? detail.retry_after_seconds : 0;
+    return {
+      error_type: "cooldown_active",
+      user_message: typeof detail.user_message === "string" ? detail.user_message : CODEX_RATE_LIMITS_GENERIC_ERROR_MESSAGE,
+      retry_after_seconds: retryAfterSeconds,
+    };
+  }
+  return {
+    error_type: "unknown_error",
+    user_message: CODEX_RATE_LIMITS_GENERIC_ERROR_MESSAGE,
+    retry_after_seconds: 0,
+  };
+}
+
 let codexRateLimitsCooldownIntervalId = null;
 
 function stopCodexRateLimitsCooldownCountdown() {
@@ -852,31 +881,50 @@ function initApp() {
     const button = document.querySelector("#codexRateLimitsRefresh");
     button.disabled = true;
     button.textContent = "取得中...";
+    // Response bodies are never read for display here (no `.text()`, never
+    // passed into an Error) — `codexRateLimitsErrorDisplay` is the only path
+    // that turns a response into displayed text, and it never echoes body
+    // content back except the two fixed 429 fields.
+    let cooldownStarted = false;
     try {
       const response = await fetch("/api/codex-rate-limits/refresh", { method: "POST" });
       if (response.status === 429) {
-        const body = await response.json().catch(() => ({}));
-        const detail = body.detail || {};
-        renderCodexRateLimits({ ...state.codexRateLimits, error_type: "cooldown_active", user_message: detail.user_message });
-        if (detail.retry_after_seconds > 0) {
-          startCodexRateLimitsCooldownCountdown(detail.retry_after_seconds);
-        } else {
-          button.disabled = false;
-          button.textContent = "自動取得";
+        const body = await response.json().catch(() => null);
+        const resolved = codexRateLimitsErrorDisplay(429, body);
+        renderCodexRateLimits({
+          ...state.codexRateLimits,
+          error_type: resolved.error_type,
+          user_message: resolved.user_message,
+        });
+        if (resolved.retry_after_seconds > 0) {
+          cooldownStarted = true;
+          startCodexRateLimitsCooldownCountdown(resolved.retry_after_seconds);
         }
         return;
       }
       if (!response.ok) {
-        throw new Error(await response.text());
+        const resolved = codexRateLimitsErrorDisplay(response.status, null);
+        renderCodexRateLimits({
+          ...state.codexRateLimits,
+          error_type: resolved.error_type,
+          user_message: resolved.user_message,
+        });
+        return;
       }
       const data = await response.json();
       renderCodexRateLimits(data);
-      button.disabled = false;
-      button.textContent = "自動取得";
     } catch (error) {
-      renderCodexRateLimits({ ...state.codexRateLimits, error_type: "unknown_error", user_message: error.message });
-      button.disabled = false;
-      button.textContent = "自動取得";
+      const resolved = codexRateLimitsErrorDisplay(null, null);
+      renderCodexRateLimits({
+        ...state.codexRateLimits,
+        error_type: resolved.error_type,
+        user_message: resolved.user_message,
+      });
+    } finally {
+      if (!cooldownStarted) {
+        button.disabled = false;
+        button.textContent = "自動取得";
+      }
     }
   });
 
@@ -923,5 +971,6 @@ if (typeof module !== "undefined") {
     githubResourceCardHtml,
     githubRateLimitHtml,
     githubAutoRefreshNoticeHtml,
+    codexRateLimitsErrorDisplay,
   };
 }

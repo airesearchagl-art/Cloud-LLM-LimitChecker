@@ -415,3 +415,50 @@ def test_controller_isolated_between_instances(tmp_path):
 
     assert status_a["last_success_at"] is not None
     assert status_b["last_success_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Defense-in-depth: even if the adapter itself raises unexpectedly (with a
+# message that happens to contain something sensitive-looking), the resulting
+# HTTP response body must never echo it back. This backs the UI-side fix
+# (static/app.js no longer reads response bodies for display at all), but
+# also confirms the backend's own default behavior for an unhandled exception.
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_unexpected_exception_response_never_leaks_message(tmp_path, monkeypatch):
+    app.state.codex_rate_limits_controller = CodexRateLimitsController()
+    monkeypatch.setattr(
+        "app.codex_rate_limits_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-rate-limits.json"
+    )
+    secret_marker = "sk-ant-api03-SHOULD-NEVER-LEAK-INTO-RESPONSE"
+
+    def explode(*, now=None, **kwargs):
+        raise RuntimeError(f"boom: token={secret_marker}")
+
+    monkeypatch.setattr("app.main.fetch_codex_rate_limits", explode)
+    set_now(monkeypatch, NOW)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/api/codex-rate-limits/refresh")
+
+    assert response.status_code == 500
+    assert secret_marker not in response.text
+    assert "Traceback" not in response.text
+
+
+def test_refresh_unexpected_exception_does_not_write_cache(tmp_path, monkeypatch):
+    app.state.codex_rate_limits_controller = CodexRateLimitsController()
+    cache_path = tmp_path / "codex-rate-limits.json"
+    monkeypatch.setattr("app.codex_rate_limits_cache.resolve_cache_path", lambda env=None: cache_path)
+
+    def explode(*, now=None, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.main.fetch_codex_rate_limits", explode)
+    set_now(monkeypatch, NOW)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/api/codex-rate-limits/refresh")
+
+    assert not cache_path.exists()
