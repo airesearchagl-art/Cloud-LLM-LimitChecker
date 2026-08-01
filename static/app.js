@@ -187,16 +187,19 @@ function githubAutoRefreshNoticeHtml(data) {
 // DOMに触れない純粋関数: Overallが"Limited"のとき、原因がcore/graphqlのどちらで、
 // Exhausted(枠を使い切った)なのかReset overdue(reset時刻を過ぎたのに未更新)なのかを判定する。
 // Overall判定自体(app/github_rate_limit.py)は変更せず、表示上の区別だけをここで行う。
-// core/graphqlどちらもReset overdue/Exhaustedに該当し得る場合はcoreを優先する
+// 表示優先順位はバックエンドのdetermine_overallの重大度順(Reset overdue > Exhausted)とは
+// 独立に決めている: Exhaustedが1件でもあればRATE LIMITEDを優先して表示し、Exhaustedが
+// 無い場合に限りRESET OVERDUEを表示する(枠を使い切っている方が利用者への影響が大きいため)。
+// 同一status同士がtieする場合はcoreを優先する
 // (バックエンドのdetermine_overallの同点時tie-break "core"と表示を一致させるため)。
 function githubLimitedCause(resources) {
   if (!resources) return null;
   const core = resources.core;
   const graphql = resources.graphql;
-  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
-  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
   if (core && core.status === "Exhausted") return { resource: "core", variant: "rate_limited" };
   if (graphql && graphql.status === "Exhausted") return { resource: "graphql", variant: "rate_limited" };
+  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
+  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
   return null;
 }
 
@@ -219,7 +222,9 @@ function githubLimitedBannerHtml(overall, resources, stale) {
       : "RATE LIMITED";
 
   const subtext = stale
-    ? "最終確認時点では制限中でした（現在の状態ではありません）"
+    ? isOverdue
+      ? "最終確認時点でreset時刻を経過していましたが、新しい値は未取得です（現在の状態ではありません）"
+      : "最終確認時点では制限中でした（現在の状態ではありません）"
     : isOverdue
       ? "reset時刻を過ぎていますが、まだ新しい値を取得できていません。"
       : "利用枠の上限に達しています。";

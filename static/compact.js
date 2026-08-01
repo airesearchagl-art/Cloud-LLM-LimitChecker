@@ -211,15 +211,17 @@ function githubOverallHtml(overall) {
 // DOMに触れない純粋関数: app.jsのgithubLimitedCauseと同一ロジック。
 // Overall判定(app/github_rate_limit.py)には触れず、core/graphqlのresource statusから
 // Exhausted(枠を使い切った)かReset overdue(reset時刻経過後も未更新)かを表示用に区別する。
-// 同点時はcoreを優先し、バックエンドのdetermine_overallのtie-breakと一致させる。
+// 表示優先順位はバックエンドの重大度順(Reset overdue > Exhausted)とは独立に決めている:
+// Exhaustedが1件でもあればRATE LIMITEDを優先表示し、Exhaustedが無い場合のみRESET OVERDUEを
+// 表示する。同一status同士がtieする場合はcoreを優先し、determine_overallのtie-breakと一致させる。
 function githubLimitedCause(resources) {
   if (!resources) return null;
   const core = resources.core;
   const graphql = resources.graphql;
-  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
-  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
   if (core && core.status === "Exhausted") return { resource: "core", variant: "rate_limited" };
   if (graphql && graphql.status === "Exhausted") return { resource: "graphql", variant: "rate_limited" };
+  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
+  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
   return null;
 }
 
@@ -260,16 +262,39 @@ function githubSecondaryRateLimitBannerHtml(data) {
   return `<div class="compact-github-limited-banner compact-banner-secondary"><span class="compact-github-limited-badge">SECONDARY RATE LIMIT</span></div>`;
 }
 
+// DOMに触れない純粋関数: app.jsのgithubAutoRefreshNoticeHtmlと同一ルール。
+// ここでの「次回」はアプリ自身が次にgh api rate_limitを叩くタイミングであり、GitHub側の
+// 制限解除予定(reset時刻)ではない — /compactでも文言でこの区別を保つ。
+// next_auto_refresh_atが過去でも負数のカウントダウンは表示しない(resetRelativeTextが吸収)。
+function githubAutoRefreshNoticeHtml(data) {
+  if (!data) return "";
+  if (data.refreshing) {
+    return `<div class="compact-auto-refresh-notice">自動確認中…</div>`;
+  }
+  if (data.auto_refresh_pending && data.next_auto_refresh_at) {
+    const relative = resetRelativeText(data.next_auto_refresh_at);
+    const relativeSuffix = relative === "reset時刻超過" ? "（まもなく）" : `（${relative}）`;
+    return `<div class="compact-auto-refresh-notice">アプリの次回取得予定: ${fmtDateOrUnknown(data.next_auto_refresh_at)}${relativeSuffix}</div>`;
+  }
+  if (data.last_auto_refresh_error) {
+    return `<div class="compact-auto-refresh-notice">自動再取得に失敗しました: ${escapeHtml(data.last_auto_refresh_error.user_message || "")}</div>`;
+  }
+  return "";
+}
+
 // DOMに触れない純粋関数: GET /api/github-rate-limit のレスポンスからGitHubセクションのHTMLを組み立てる。
 // REST/GraphQL/Searchは固定順(状態による並び替えをしない)で常に横並び表示する。
 function githubSectionHtml(data) {
+  const autoRefreshNoticeHtml = githubAutoRefreshNoticeHtml(data);
+
   if (!data || !data.fetched) {
     const usingLastKnown = data && !data.fetched && data.last_known;
     const secondaryHtml = githubSecondaryRateLimitBannerHtml(data);
     if (!usingLastKnown) {
       return `
         ${secondaryHtml}
-        <div class="compact-card compact-empty">GitHub Rate Limit: 未取得</div>`;
+        <div class="compact-card compact-empty">GitHub Rate Limit: 未取得</div>
+        ${autoRefreshNoticeHtml}`;
     }
     const resources = data.last_known.resources;
     const overall = data.last_known.overall;
@@ -278,6 +303,7 @@ function githubSectionHtml(data) {
       <div class="compact-stale-notice">直近の取得は失敗しました。以下は${fmtDateOrUnknown(data.last_known.collected_at)}時点の情報です。</div>
       ${githubLimitedBannerHtml(overall, resources, true)}
       ${githubOverallHtml(overall)}
+      ${autoRefreshNoticeHtml}
       <div class="compact-github-grid-inner">
         ${githubResourceCardHtml(resources.core)}
         ${githubResourceCardHtml(resources.graphql)}
@@ -288,6 +314,7 @@ function githubSectionHtml(data) {
   return `
     ${githubLimitedBannerHtml(data.overall, data.resources, false)}
     ${githubOverallHtml(data.overall)}
+    ${autoRefreshNoticeHtml}
     <div class="compact-github-grid-inner">
       ${githubResourceCardHtml(data.resources.core)}
       ${githubResourceCardHtml(data.resources.graphql)}
@@ -545,6 +572,7 @@ if (typeof module !== "undefined") {
     githubLimitedCause,
     githubLimitedBannerHtml,
     githubSecondaryRateLimitBannerHtml,
+    githubAutoRefreshNoticeHtml,
     githubSectionHtml,
     claudeUsageWindowHtml,
     claudeCodeSectionHtml,
