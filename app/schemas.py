@@ -238,6 +238,13 @@ class CodexRateLimitsSnapshot(BaseModel):
     cooldown_remaining_seconds: int
     fallback_available: bool
     fallback_source: str | None
+    auto_refresh_enabled: bool
+    auto_refresh_interval_seconds: int
+    auto_refresh_running: bool
+    next_auto_refresh_at: str | None
+    last_auto_refresh_attempt_at: str | None
+    last_auto_refresh_success_at: str | None
+    last_auto_refresh_error_type: str | None
 
 
 class CollectorRunRead(BaseModel):

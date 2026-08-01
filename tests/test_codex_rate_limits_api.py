@@ -103,6 +103,23 @@ def test_get_initial_state_not_observed(rl_client):
     assert body["cooldown_remaining_seconds"] == 0
 
 
+# 23-26: periodic-refresh status fields are present with sane defaults
+# (the scheduler backing app.state here is the test-suite safety net from
+# tests/conftest.py — enabled by default, isolated cache path, fetch stub
+# that would raise loudly if it were ever actually called).
+def test_get_includes_periodic_refresh_status_fields(rl_client):
+    response = rl_client.get("/api/codex-rate-limits")
+    body = response.json()
+
+    assert body["auto_refresh_enabled"] is True
+    assert body["auto_refresh_interval_seconds"] == 600
+    assert isinstance(body["auto_refresh_running"], bool)
+    assert "next_auto_refresh_at" in body
+    assert body["last_auto_refresh_attempt_at"] is None
+    assert body["last_auto_refresh_success_at"] is None
+    assert body["last_auto_refresh_error_type"] is None
+
+
 # ---------------------------------------------------------------------------
 # 26/27: 成功時のみcache更新 / 失敗時に既存cache維持
 # ---------------------------------------------------------------------------
@@ -462,3 +479,35 @@ def test_refresh_unexpected_exception_does_not_write_cache(tmp_path, monkeypatch
         client.post("/api/codex-rate-limits/refresh")
 
     assert not cache_path.exists()
+
+
+# 8/9/10/28: FastAPI lifespan starts exactly one scheduler task on entry and
+# fully stops it on exit — no task left running once the TestClient closes.
+def test_lifespan_starts_and_stops_the_scheduler_task_cleanly():
+    scheduler = app.state.codex_rate_limits_scheduler  # set by tests/conftest.py's autouse fixture
+    assert scheduler._task is None
+
+    with TestClient(app):
+        assert scheduler._task is not None
+        assert scheduler.status()["auto_refresh_running"] is True
+
+    assert scheduler._task is None
+    assert scheduler.status()["auto_refresh_running"] is False
+
+
+# 9: manual POST still works normally with the scheduler attached to the app
+def test_manual_refresh_still_works_with_scheduler_attached(tmp_path, monkeypatch):
+    app.state.codex_rate_limits_controller = CodexRateLimitsController()
+    monkeypatch.setattr(
+        "app.codex_rate_limits_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-rate-limits.json"
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_codex_rate_limits", fake_success({"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW})
+    )
+    set_now(monkeypatch, NOW)
+
+    with TestClient(app) as client:
+        response = client.post("/api/codex-rate-limits/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True

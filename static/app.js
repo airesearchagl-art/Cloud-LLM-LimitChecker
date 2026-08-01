@@ -358,11 +358,11 @@ function startCodexRateLimitsCooldownCountdown(retryAfterSeconds) {
     if (remaining <= 0) {
       stopCodexRateLimitsCooldownCountdown();
       button.disabled = false;
-      button.textContent = "自動取得";
+      button.textContent = "今すぐ更新";
       return;
     }
     button.disabled = true;
-    button.textContent = `自動取得（あと${remaining}秒）`;
+    button.textContent = `今すぐ更新（あと${remaining}秒）`;
     remaining -= 1;
   };
   tick();
@@ -402,9 +402,17 @@ function renderCodexUsage(data) {
   }
 }
 
+function fmtMinutesFromSeconds(seconds) {
+  if (typeof seconds !== "number" || Number.isNaN(seconds)) return "不明";
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}分`;
+}
+
 // Codex App Server(account/rateLimits/read)の自動取得状態のみを表示する。
 // 実際のカード表示・fallback判定は監視用ダッシュボード側(resolveCodexDisplay)が担い、
 // ここでは「今どの状態か」を確認できれば十分な最小表示にとどめる。
+// 画面上のタイマー表示は/api/codex-rate-limitsのGET結果を表示するだけで、ここから
+// 更新系リクエストを送ることはない(定期更新はサーバー側schedulerが行う)。
 function renderCodexRateLimits(data) {
   state.codexRateLimits = data;
   const resultEl = document.querySelector("#codexRateLimitsResult");
@@ -421,11 +429,24 @@ function renderCodexRateLimits(data) {
     ? `<div class="codex-usage-error">${escapeHtml(data.user_message || "")}</div>`
     : "";
 
+  const autoRefreshEnabledText = data.auto_refresh_enabled ? "有効" : "無効";
+  const autoRefreshIntervalText = fmtMinutesFromSeconds(data.auto_refresh_interval_seconds);
+  const nextAutoRefreshText = data.next_auto_refresh_at ? fmtDate(data.next_auto_refresh_at) : "未定";
+  const lastAutoAttemptText = data.last_auto_refresh_attempt_at ? fmtDate(data.last_auto_refresh_attempt_at) : "未実行";
+  const lastAutoSuccessText = data.last_auto_refresh_success_at ? fmtDate(data.last_auto_refresh_success_at) : "未成功";
+
   resultEl.innerHTML = `
     <div class="codex-rate-limits-status">
       <div>自動取得状態: ${escapeHtml(statusLabel)}</div>
       <div>最終自動取得時刻: ${escapeHtml(lastAttemptText)}</div>
       <div>現在表示中のsource: ${escapeHtml(currentSource)}</div>
+    </div>
+    <div class="codex-rate-limits-status codex-rate-limits-periodic">
+      <div>自動更新: ${escapeHtml(autoRefreshEnabledText)}</div>
+      <div>更新間隔: ${escapeHtml(autoRefreshIntervalText)}</div>
+      <div>次回自動更新予定: ${escapeHtml(nextAutoRefreshText)}</div>
+      <div>最終自動更新試行: ${escapeHtml(lastAutoAttemptText)}</div>
+      <div>最終成功: ${escapeHtml(lastAutoSuccessText)}</div>
     </div>
     ${errorHtml}
   `;
@@ -923,7 +944,7 @@ function initApp() {
     } finally {
       if (!cooldownStarted) {
         button.disabled = false;
-        button.textContent = "自動取得";
+        button.textContent = "今すぐ更新";
       }
     }
   });

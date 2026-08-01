@@ -27,6 +27,7 @@ from app.codex_rate_limits_state import (
     CodexRateLimitsRefreshCooldownError,
     CodexRateLimitsRefreshInProgressError,
 )
+from app.codex_rate_limits_scheduler import CodexRateLimitsScheduler
 from app.collectors.importer import CollectorImportError, import_normalized_records
 from app.collectors.claude_collector import (
     ClaudeCollectorConfigError,
@@ -128,7 +129,15 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     # garbage-collected mid-execution (a well-known asyncio.create_task
     # pitfall). Discarded automatically once each task finishes.
     app_instance.state.auto_refresh_tasks = set()
-    yield
+    # Exactly one periodic Codex rate limit refresh task per process, started
+    # only here (never at module import time) and always cancelled + awaited
+    # on shutdown — so re-entering this lifespan (as TestClient does per
+    # `with` block) never leaves a task running or accumulates a second one.
+    app_instance.state.codex_rate_limits_scheduler.start()
+    try:
+        yield
+    finally:
+        await app_instance.state.codex_rate_limits_scheduler.stop()
 
 
 app = FastAPI(title="Cloud LLM Limit Checker", version="0.1.0", lifespan=lifespan)
@@ -143,6 +152,16 @@ app.state.github_rate_limit_controller = GitHubRateLimitController()
 # rate limit data lives in the file-based cache, not here. Page load never
 # starts Codex App Server — only the POST refresh endpoint below does.
 app.state.codex_rate_limits_controller = CodexRateLimitsController()
+
+# Process-local only (see CodexRateLimitsScheduler docstring): reuses the
+# same controller/adapter the manual refresh endpoint uses, so a periodic
+# attempt and a manual click are mutually exclusive through the same lock.
+# Constructed here (env-driven enabled/interval read once, not re-read on
+# each cycle) but only started/stopped inside `lifespan` above.
+app.state.codex_rate_limits_scheduler = CodexRateLimitsScheduler(
+    controller=app.state.codex_rate_limits_controller,
+    fetch=fetch_codex_rate_limits,
+)
 
 
 def _current_utc_time() -> datetime:
@@ -552,6 +571,7 @@ def _codex_rate_limits_response(now: datetime) -> dict:
     # whether it exists, so the display layer can decide when to fall back to
     # it (see docs/codex-rate-limits-auto.md).
     manual_fallback = codex_usage_cache.load_snapshot(now=now)
+    scheduler: CodexRateLimitsScheduler = app.state.codex_rate_limits_scheduler
     return {
         "fetched": snapshot["available"],
         "available": snapshot["available"],
@@ -567,6 +587,7 @@ def _codex_rate_limits_response(now: datetime) -> dict:
         "cooldown_remaining_seconds": status["cooldown_remaining_seconds"],
         "fallback_available": manual_fallback["available"],
         "fallback_source": codex_usage_cache.SOURCE_NAME if manual_fallback["available"] else None,
+        **scheduler.status(),
     }
 
 

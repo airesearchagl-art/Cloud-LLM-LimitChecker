@@ -363,11 +363,29 @@ function resolveCodexDisplay(auto, manual) {
 
 // DOMに触れない純粋関数: GET /api/codex-rate-limits(自動取得) と GET /api/codex-usage(手動入力) の
 // レスポンスからCodex Usageセクション全体のHTMLを組み立てる。
+function fmtMinutesFromSeconds(seconds) {
+  if (typeof seconds !== "number" || Number.isNaN(seconds)) return "不明";
+  return `${Math.round(seconds / 60)}分`;
+}
+
+// DOMに触れない純粋関数: サーバー側10分間隔schedulerの状態(GET /api/codex-rate-limitsに
+// 含まれるauto_refresh_interval_seconds / next_auto_refresh_at)を1行だけ表示する。
+// ここから更新系リクエストを送ることはない(表示専用)。
+function codexPeriodicRefreshNoticeHtml(auto) {
+  if (!auto || typeof auto.auto_refresh_interval_seconds !== "number") return "";
+  const intervalText = fmtMinutesFromSeconds(auto.auto_refresh_interval_seconds);
+  const nextText = auto.next_auto_refresh_at ? fmtDateOrUnknown(auto.next_auto_refresh_at) : "未定";
+  return `<div class="compact-stale-notice">自動更新: ${escapeHtml(intervalText)} / 次回予定: ${escapeHtml(nextText)}</div>`;
+}
+
 function codexUsageSectionHtml(auto, manual) {
   const resolved = resolveCodexDisplay(auto, manual);
   if (!resolved.source) {
     const message = resolved.status === "invalid_cache" ? "取得不可" : "自動取得または手動入力してください";
-    return `<div class="compact-card compact-empty">Codex Usage: ${message}</div>`;
+    return `
+      <div class="compact-card compact-empty">Codex Usage: ${message}</div>
+      ${codexPeriodicRefreshNoticeHtml(auto)}
+    `;
   }
 
   const staleNoticeHtml = resolved.stale
@@ -382,6 +400,7 @@ function codexUsageSectionHtml(auto, manual) {
       ${codexUsageWindowHtml("週次枠", resolved.weekly, resolved.badgeLabel)}
     </div>
     <div class="compact-stale-notice">${lastLabel}: ${fmtDateOrUnknown(resolved.observed_at)}</div>
+    ${codexPeriodicRefreshNoticeHtml(auto)}
   `;
 }
 
@@ -470,6 +489,7 @@ if (typeof module !== "undefined") {
     claudeCodeSectionHtml,
     codexUsageWindowHtml,
     resolveCodexDisplay,
+    codexPeriodicRefreshNoticeHtml,
     codexUsageSectionHtml,
   };
 }
