@@ -5,17 +5,44 @@ Codex CLIには公式のCodex App Server（`codex app-server --stdio`、JSON-RPC
 ## 前提
 
 - 使用するのは`account/rateLimits/read`だけです。`account/rateLimitResetCredit/consume`等のreset credit関連method、task/thread/prompt関連methodは一切呼び出しません。
-- `account/rateLimits/updated`通知の継続購読、常駐App Server、時間間隔による自動バックグラウンド更新はPhase 1の対象外です。
+- `account/rateLimits/updated`通知の継続購読、常駐App Server（プロセスを起動しっぱなしにする方式）はPhase 1の対象外です。時間間隔による定期更新（10分polling）はPhase 1で実装済みです（下記「定期更新」参照）。
 - `~/.codex/auth.json`等の認証ファイルやOS credential storeを直接読むことはありません。App Serverが自身の既存認証（ChatGPT認証など）を内部的に使用するだけです。
-- ページ表示だけではApp Serverを起動しません。管理画面の「自動取得」ボタンを押したときだけ、one-shotでApp Serverを起動します。
+- ページ表示自体はApp Serverを起動しません。App Serverが起動するのは、(1) 管理画面の「今すぐ更新」ボタンを押したとき、(2) サーバー側の定期更新scheduler（後述）が周期到来したとき、のいずれかだけです。
 
-## 動作
+## 動作（one-shot取得の手順）
 
-1. 「自動取得」ボタンを押す
+1. 「今すぐ更新」ボタンを押す、または定期更新schedulerの周期が到来する
 2. `codex app-server --stdio`を一時的に起動し、公式手順どおり`initialize` → `initialized`通知 → `account/rateLimits/read`を1回だけ実行
 3. 成功時のみ、5時間枠・週次枠のデータをローカルキャッシュへ保存
 4. 失敗時は既存キャッシュを上書きせず、固定文言のエラーメッセージだけを表示
 5. App Serverプロセスは毎回確実に終了させます（stdinを閉じる→終了待ち→必要ならterminate→さらに必要ならkill）
+
+## 定期更新（10分間隔、server-side scheduler）
+
+- FastAPIのlifespanに統合されたbackground taskとして実装しています（`app/codex_rate_limits_scheduler.py`）。ブラウザの`setInterval`には依存しないため、ブラウザを閉じていてもサーバー稼働中は更新され続けます。
+- 既存のone-shot adapter（`app/codex_rate_limits_adapter.py`）・cache（`app/codex_rate_limits_cache.py`）・排他制御（`app/codex_rate_limits_state.py`の`CodexRateLimitsController`）をそのまま再利用します。schedulerはJSON-RPC解析・cache形式変換・認証処理・stdout/stderr保存・reset credit操作を一切行いません。
+- 手動更新（「今すぐ更新」ボタン）と定期更新は同じcontrollerの排他制御を通るため、同時実行しません。手動実行中は定期更新側が黙ってskipし、定期更新実行中の手動POSTは既存の`already_refreshing`（429）として扱われます。skipはエラーとしてcacheへ保存されません。
+- 取得失敗（process起動失敗・timeout・authentication unavailable・protocol error・invalid response等）が発生してもbackground task自体は終了せず、次の周期で再試行します。既存cache・手動fallbackはそのまま維持されます。
+
+### 環境変数
+
+| 環境変数 | 既定値 | 説明 |
+|---|---|---|
+| `CLOUD_LLM_CODEX_AUTO_REFRESH_ENABLED` | `true` | `0` / `false` / `no` / `off`（大小文字無視）で無効化。それ以外の値はすべて有効として扱う |
+| `CLOUD_LLM_CODEX_AUTO_REFRESH_SECONDS` | `600`（10分） | 更新間隔（秒）。60秒未満の値は60秒へ補正、数値として解釈できない値は既定値600秒へfallback |
+
+設定値・環境変数の内容自体はログへ出力しません。
+
+### 初回更新のタイミング
+
+- サーバー起動直後には即実行しません。
+- 既存の自動取得cacheが新鮮（利用可能かつstaleでない）な場合は、次の10分周期まで待ちます。
+- cacheが存在しない、またはstaleな場合は、起動から30秒後（60秒以内）に初回取得を行います。
+
+### single-worker前提
+
+- schedulerはprocess-localです。このローカルアプリはsingle-worker運用を前提としています。
+- `uvicorn --workers 2`以上で起動した場合、workerごとに独立したschedulerが起動し、それぞれが未協調のままAPI Serverを起動するため、重複取得の可能性があります。分散lockやDB lockはPhase 1では実装していません。single-worker運用を前提とし、複数worker対応は非対応と明記します。
 
 ## 保存先
 
@@ -61,12 +88,18 @@ Windows環境では以下に保存されます（手動入力snapshot・Claude C
 
 ## API
 
-- `GET /api/codex-rate-limits`: read-only。保存済みキャッシュと直近のrefresh状態を返すだけで、App Serverは起動しません。
-- `POST /api/codex-rate-limits/refresh`: `account/rateLimits/read`を1回だけ実行する唯一のエンドポイントです。
+- `GET /api/codex-rate-limits`: read-only。保存済みキャッシュ・直近のrefresh状態・定期更新schedulerの状態を返すだけで、App Serverは起動しません。
+  - 定期更新関連の追加フィールド: `auto_refresh_enabled` / `auto_refresh_interval_seconds` / `auto_refresh_running` / `next_auto_refresh_at` / `last_auto_refresh_attempt_at` / `last_auto_refresh_success_at` / `last_auto_refresh_error_type`（いずれもtimezone-aware ISO 8601文字列またはbool/int/null。`last_auto_refresh_error_type`は固定文言のerror_typeのみで、内部例外メッセージは含みません）
+  - これらはprocess-localな状態です（複数workerでは共有されません、上記「single-worker前提」参照）
+- `POST /api/codex-rate-limits/refresh`: `account/rateLimits/read`を1回だけ実行する唯一の即時実行エンドポイントです（定期更新とは別に、手動で今すぐ実行したい場合に使います）。
 
-## 後続Phase（今回の対象外）
+## 将来案として検討する内容（Phase 1の対象外）
 
-- `account/rateLimits/updated`通知の継続購読
-- 時間間隔による自動バックグラウンド更新、reset後の自動更新
+- `account/rateLimits/updated`通知の継続購読による、利用率変化に近いタイミングでのpush型更新
+  - ただし常駐App Server、再接続処理、プロセス監視、認証切れハンドリング、shutdown処理、通知の重複処理が別途必要になります
+  - Phase 1では10分pollingを採用し、運用上それで十分かを確認したうえでpush方式への移行を判断します
 - 複数limit id（`rateLimitsByLimitId`）対応
 - credits / reset credit関連表示
+- 複数worker対応（分散lock等）
+- reset時刻ぴったりの更新、使用率変化検知による即時更新
+- Windows service化・system tray常駐

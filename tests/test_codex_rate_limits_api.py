@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from app import codex_rate_limits_cache
 from app import codex_usage_cache
 from app.codex_rate_limits_adapter import CodexRateLimitsFetchResult
+from app.codex_rate_limits_scheduler import CodexRateLimitsScheduler
 from app.codex_rate_limits_state import CodexRateLimitsController
 from app.main import app
 
@@ -101,6 +103,23 @@ def test_get_initial_state_not_observed(rl_client):
     assert body["weekly"] is None
     assert body["refresh_in_progress"] is False
     assert body["cooldown_remaining_seconds"] == 0
+
+
+# 23-26: periodic-refresh status fields are present with sane defaults
+# (the scheduler backing app.state here is the test-suite safety net from
+# tests/conftest.py — enabled by default, isolated cache path, fetch stub
+# that would raise loudly if it were ever actually called).
+def test_get_includes_periodic_refresh_status_fields(rl_client):
+    response = rl_client.get("/api/codex-rate-limits")
+    body = response.json()
+
+    assert body["auto_refresh_enabled"] is True
+    assert body["auto_refresh_interval_seconds"] == 600
+    assert isinstance(body["auto_refresh_running"], bool)
+    assert "next_auto_refresh_at" in body
+    assert body["last_auto_refresh_attempt_at"] is None
+    assert body["last_auto_refresh_success_at"] is None
+    assert body["last_auto_refresh_error_type"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -462,3 +481,151 @@ def test_refresh_unexpected_exception_does_not_write_cache(tmp_path, monkeypatch
         client.post("/api/codex-rate-limits/refresh")
 
     assert not cache_path.exists()
+
+
+# 8/9/10/28: FastAPI lifespan starts exactly one scheduler task on entry and
+# fully stops it on exit — no task left running once the TestClient closes.
+def test_lifespan_starts_and_stops_the_scheduler_task_cleanly():
+    scheduler = app.state.codex_rate_limits_scheduler  # set by tests/conftest.py's autouse fixture
+    assert scheduler._task is None
+
+    with TestClient(app):
+        assert scheduler._task is not None
+        assert scheduler.status()["auto_refresh_running"] is True
+
+    assert scheduler._task is None
+    assert scheduler.status()["auto_refresh_running"] is False
+
+
+# 9: manual POST still works normally with the scheduler attached to the app
+def test_manual_refresh_still_works_with_scheduler_attached(tmp_path, monkeypatch):
+    app.state.codex_rate_limits_controller = CodexRateLimitsController()
+    monkeypatch.setattr(
+        "app.codex_rate_limits_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-rate-limits.json"
+    )
+    monkeypatch.setattr(
+        "app.main.fetch_codex_rate_limits", fake_success({"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW})
+    )
+    set_now(monkeypatch, NOW)
+
+    with TestClient(app) as client:
+        response = client.post("/api/codex-rate-limits/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# AI Review Agent follow-up: single-yield lifespan, repeated TestClient
+# cycles, startup-exception cleanup, disabled-scheduler edge case, and the
+# tests/conftest.py save/restore mechanism itself.
+# ---------------------------------------------------------------------------
+
+
+def test_lifespan_function_yields_exactly_once():
+    """Structural guarantee, not just behavioral: `async def lifespan` (the
+    function wrapped by `@asynccontextmanager`) must contain exactly one
+    `yield` expression, or FastAPI/Starlette can raise
+    `RuntimeError: generator didn't stop` on shutdown."""
+    import ast
+    import inspect
+
+    from app.main import lifespan
+
+    # `lifespan` is wrapped by @asynccontextmanager; the original async
+    # generator function is preserved as `__wrapped__` by `functools.wraps`
+    # (which `contextlib.asynccontextmanager` uses internally).
+    raw_func = inspect.unwrap(lifespan)
+    source = inspect.getsource(raw_func)
+    tree = ast.parse(source)
+    yield_nodes = [node for node in ast.walk(tree) if isinstance(node, (ast.Yield, ast.YieldFrom))]
+    assert len(yield_nodes) == 1
+
+
+def test_repeated_testclient_cycles_never_leave_a_task_or_raise():
+    """Opening and closing several TestClient sessions back-to-back on the
+    same `app` must never accumulate tasks and must never raise
+    `RuntimeError: generator didn't stop` (which would surface here as an
+    exception escaping the `with` block on `__exit__`)."""
+    scheduler = app.state.codex_rate_limits_scheduler
+    for _ in range(3):
+        with TestClient(app):
+            assert scheduler._task is not None
+        assert scheduler._task is None
+
+
+def test_scheduler_stop_is_called_even_if_start_raises():
+    """Simulates a startup failure between `scheduler.start()` and `yield`:
+    `finally: await scheduler.stop()` in `app.main.lifespan` must still run,
+    and the original exception must still propagate (never swallowed)."""
+    from app.main import lifespan
+
+    class ExplodingScheduler:
+        def __init__(self) -> None:
+            self.start_called = False
+            self.stop_called = False
+
+        def start(self) -> None:
+            self.start_called = True
+            raise RuntimeError("simulated startup failure")
+
+        async def stop(self) -> None:
+            self.stop_called = True
+
+    exploding = ExplodingScheduler()
+    original = app.state.codex_rate_limits_scheduler
+    app.state.codex_rate_limits_scheduler = exploding
+    try:
+
+        async def scenario():
+            async with lifespan(app):
+                pytest.fail("should never reach inside the context manager")
+
+        with pytest.raises(RuntimeError, match="simulated startup failure"):
+            asyncio.run(scenario())
+    finally:
+        app.state.codex_rate_limits_scheduler = original
+
+    assert exploding.start_called is True
+    assert exploding.stop_called is True
+
+
+def test_disabled_scheduler_has_no_task_and_no_next_attempt(tmp_path):
+    def explode(**kwargs):
+        raise AssertionError("disabled scheduler must never fetch")
+
+    disabled = CodexRateLimitsScheduler(
+        controller=CodexRateLimitsController(),
+        fetch=explode,
+        enabled=False,
+        cache_path=tmp_path / "codex-rate-limits.json",
+    )
+    disabled.start()
+    status = disabled.status()
+    assert disabled._task is None
+    assert status["auto_refresh_enabled"] is False
+    assert status["auto_refresh_running"] is False
+    assert status["next_auto_refresh_at"] is None
+
+
+def test_safe_scheduler_context_manager_restores_original_after_exit(tmp_path):
+    """Directly exercises tests/conftest.py's save/replace/restore
+    contextmanager (not just its autouse-fixture wrapper), independent of
+    pytest's own fixture machinery."""
+    from tests.conftest import safe_codex_rate_limits_scheduler
+
+    before = app.state.codex_rate_limits_scheduler
+    with safe_codex_rate_limits_scheduler(tmp_path) as fake:
+        assert app.state.codex_rate_limits_scheduler is fake
+        assert app.state.codex_rate_limits_scheduler is not before
+    assert app.state.codex_rate_limits_scheduler is before
+
+
+def test_safe_scheduler_context_manager_restores_original_even_on_exception(tmp_path):
+    from tests.conftest import safe_codex_rate_limits_scheduler
+
+    before = app.state.codex_rate_limits_scheduler
+    with pytest.raises(ValueError):
+        with safe_codex_rate_limits_scheduler(tmp_path):
+            raise ValueError("boom")
+    assert app.state.codex_rate_limits_scheduler is before

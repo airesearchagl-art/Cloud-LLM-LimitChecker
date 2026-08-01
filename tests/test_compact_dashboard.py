@@ -534,7 +534,50 @@ AUTO_RATE_LIMITS_FRESH = {
     "cooldown_remaining_seconds": 0,
     "fallback_available": True,
     "fallback_source": "codex_manual",
+    "auto_refresh_enabled": True,
+    "auto_refresh_interval_seconds": 600,
+    "auto_refresh_running": True,
+    "next_auto_refresh_at": "2026-01-01T12:10:00+00:00",
+    "last_auto_refresh_attempt_at": "2026-01-01T12:00:00+00:00",
+    "last_auto_refresh_success_at": "2026-01-01T12:00:00+00:00",
+    "last_auto_refresh_error_type": None,
 }
+
+
+# 自動更新: 10分 / 次回予定の表示、compactからのPOST不使用
+def test_codex_periodic_refresh_notice_shows_interval_and_next_run() -> None:
+    html = run_compact_js(f"compact.codexPeriodicRefreshNoticeHtml({json.dumps(AUTO_RATE_LIMITS_FRESH)})")
+    assert "10分" in html
+    assert "2026/1/1" in html or "次回予定" in html
+
+
+def test_codex_periodic_refresh_notice_empty_for_missing_auto_data() -> None:
+    assert run_compact_js("compact.codexPeriodicRefreshNoticeHtml(null)") == ""
+    assert run_compact_js('compact.codexPeriodicRefreshNoticeHtml({available: false})') == ""
+
+
+def test_codex_usage_section_includes_periodic_refresh_notice_when_available() -> None:
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(AUTO_RATE_LIMITS_FRESH)}, null)")
+    assert "自動更新" in html
+    assert "10分" in html
+
+
+def test_codex_usage_section_includes_periodic_refresh_notice_when_unavailable() -> None:
+    unavailable_auto = {
+        "available": False,
+        "status": "not_observed",
+        "auto_refresh_enabled": True,
+        "auto_refresh_interval_seconds": 600,
+        "next_auto_refresh_at": "2026-01-01T12:10:00+00:00",
+    }
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(unavailable_auto)}, null)")
+    assert "自動取得または手動入力してください" in html
+    assert "10分" in html
+
+
+def test_compact_js_never_calls_refresh_endpoint_for_codex_periodic_notice() -> None:
+    js = COMPACT_JS.read_text(encoding="utf-8")
+    assert "/api/codex-rate-limits/refresh" not in js
 
 
 # 38: compactのsourceバッジ — 自動取得cacheが新鮮なら「自動取得」を優先表示する
