@@ -534,6 +534,14 @@ button:hover {
   padding: 8px 10px;
 }
 
+.codex-rate-limits-status {
+  color: #46545c;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  gap: 4px;
+}
+
 .panel-heading {
   align-items: center;
   display: flex;

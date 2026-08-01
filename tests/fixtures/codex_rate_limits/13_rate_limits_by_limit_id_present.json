@@ -1,0 +1,18 @@
+{
+  "rateLimits": {
+    "limitId": "fixture-limit",
+    "limitName": null,
+    "primary": {"usedPercent": 42.0, "windowDurationMins": 300, "resetsAt": 4102448400},
+    "secondary": null,
+    "rateLimitReachedType": null
+  },
+  "rateLimitsByLimitId": {
+    "fixture-limit": {
+      "limitId": "fixture-limit",
+      "limitName": null,
+      "primary": {"usedPercent": 42.0, "windowDurationMins": 300, "resetsAt": 4102448400},
+      "secondary": null,
+      "rateLimitReachedType": null
+    }
+  }
+}
