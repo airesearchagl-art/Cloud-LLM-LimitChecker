@@ -43,6 +43,7 @@ FetchErrorType = Literal[
     "cli_not_installed",
     "not_authenticated",
     "authentication_expired",
+    "secondary_rate_limit",
     "timeout",
     "command_failed",
     "api_error",
@@ -55,6 +56,7 @@ _USER_MESSAGES: dict[FetchErrorType, str] = {
     "cli_not_installed": "GitHub CLI (gh) is not installed or not on PATH.",
     "not_authenticated": "GitHub CLI is not authenticated. Run `gh auth login`.",
     "authentication_expired": "GitHub CLI authentication appears to be expired or invalid.",
+    "secondary_rate_limit": "GitHub secondary rate limit reached. This is separate from the primary core/graphql rate limit.",
     "timeout": "Fetching the GitHub rate limit timed out.",
     "command_failed": "The GitHub CLI command failed.",
     "api_error": "The GitHub API returned an error.",
@@ -106,6 +108,25 @@ def _looks_authentication_expired(stderr: str) -> bool:
     )
 
 
+def _looks_like_secondary_rate_limit(stderr: str) -> bool:
+    """Matches only GitHub's own known secondary-rate-limit wording — never a
+    bare HTTP status code. A 403/429 alone is not enough to classify this,
+    since both codes are also used for unrelated failures (permissions,
+    primary rate limiting surfaced as an HTTP error, etc.); this predicate is
+    deliberately checked before `_looks_like_api_error` so a message that
+    happens to also mention "HTTP 403" is still classified specifically.
+    """
+    lowered = stderr.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "secondary rate limit",
+            "secondary_rate_limit",
+            "abuse detection mechanism",
+        )
+    )
+
+
 def _looks_like_api_error(stderr: str) -> bool:
     lowered = stderr.lower()
     return "http 4" in lowered or "http 5" in lowered or "api error" in lowered
@@ -116,6 +137,8 @@ def _classify_failure(stderr: str) -> FetchErrorType:
         return "not_authenticated"
     if _looks_authentication_expired(stderr):
         return "authentication_expired"
+    if _looks_like_secondary_rate_limit(stderr):
+        return "secondary_rate_limit"
     if _looks_like_api_error(stderr):
         return "api_error"
     return "command_failed"

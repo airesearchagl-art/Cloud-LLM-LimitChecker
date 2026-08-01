@@ -395,3 +395,44 @@ def test_search_exhausted_alone_does_not_schedule():
     )
     assert snapshot["resources"]["search"]["status"] in ("Exhausted", "Reset overdue")
     assert snapshot["auto_refresh_pending"] is False
+
+
+# 24. stale(last_known)のoverallがLimitedのまま保持される（現在の状態と混同しないことをUI側で判定できるよう、値自体は保持する）
+def test_last_known_stale_snapshot_preserves_limited_overall():
+    controller = GitHubRateLimitController()
+    controller.refresh(
+        now=BEFORE_REFRESH_TIME,
+        fetch=fake_fetch(payload(core=resource(remaining=0, reset=RESET_EPOCH), graphql=resource(remaining=4900))),
+    )
+    result = controller.maybe_run_auto_refresh(
+        now=DUE_AT, fetch=fake_fetch(error=("api_error", "The GitHub API returned an error."))
+    )
+    assert result["fetched"] is False
+    assert result["stale"] is True
+    assert result["last_known"]["overall"]["status"] == "Limited"
+
+
+# 25. reset時刻経過後もremaining=0のままだとReset overdueになる（Overall判定自体はExhaustedと同じLimitedのまま）
+def test_reset_overdue_reflected_in_resource_status():
+    controller = GitHubRateLimitController()
+    now_after_reset = RESET_AT + timedelta(seconds=1)
+    snapshot = controller.refresh(
+        now=now_after_reset,
+        fetch=fake_fetch(payload(core=resource(remaining=0, reset=RESET_EPOCH), graphql=resource(remaining=4900))),
+    )
+    assert snapshot["resources"]["core"]["status"] == "Reset overdue"
+    assert snapshot["overall"]["status"] == "Limited"
+
+
+# 26. resetを跨いで新しい値を取得するとNormalへ復旧する
+def test_recovery_to_normal_after_reset_value_advances():
+    controller = GitHubRateLimitController()
+    controller.refresh(
+        now=BEFORE_REFRESH_TIME,
+        fetch=fake_fetch(payload(core=resource(remaining=0, reset=RESET_EPOCH), graphql=resource())),
+    )
+    new_payload = payload(core=resource(remaining=4900, reset=RESET_EPOCH + 3600), graphql=resource(remaining=4900))
+    result = controller.maybe_run_auto_refresh(now=DUE_AT, fetch=fake_fetch(new_payload))
+    assert result["fetched"] is True
+    assert result["overall"]["status"] == "Normal"
+    assert result["resources"]["core"]["status"] == "Normal"
