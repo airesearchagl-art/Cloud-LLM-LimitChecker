@@ -133,11 +133,16 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     # only here (never at module import time) and always cancelled + awaited
     # on shutdown — so re-entering this lifespan (as TestClient does per
     # `with` block) never leaves a task running or accumulates a second one.
-    app_instance.state.codex_rate_limits_scheduler.start()
+    # `start()` lives inside the `try` (not before it) so that even if it
+    # were ever to raise, `finally` still runs `stop()` — which is itself a
+    # no-op when no task was actually created. Exactly one `yield` below;
+    # this function must never yield a second time.
+    scheduler = app_instance.state.codex_rate_limits_scheduler
     try:
+        scheduler.start()
         yield
     finally:
-        await app_instance.state.codex_rate_limits_scheduler.stop()
+        await scheduler.stop()
 
 
 app = FastAPI(title="Cloud LLM Limit Checker", version="0.1.0", lifespan=lifespan)
