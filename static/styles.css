@@ -488,6 +488,52 @@ button:hover {
   overflow-wrap: anywhere;
 }
 
+.codex-usage-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.codex-usage-fieldset {
+  border: 1px solid #d9e1e5;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.codex-usage-fieldset legend {
+  color: #46545c;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 0 4px;
+}
+
+.codex-usage-fieldset label {
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.codex-usage-error {
+  background: #fff4f4;
+  border-left: 4px solid #c62828;
+  color: #8f1d1d;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.codex-usage-success {
+  background: #dcefe4;
+  border-left: 4px solid #1f8a4c;
+  color: #145a35;
+  font-size: 13px;
+  padding: 8px 10px;
+}
+
 .panel-heading {
   align-items: center;
   display: flex;

@@ -4,6 +4,7 @@ const state = {
   history: [],
   collectorRuns: [],
   editingLimitId: null,
+  codexUsage: null,
 };
 
 const api = async (path, options = {}) => {
@@ -251,7 +252,7 @@ function applyFiltersAndSort(rows) {
 }
 
 async function loadAll() {
-  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit] = await Promise.all([
+  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit, codexUsage] = await Promise.all([
     api("/api/services"),
     api("/api/limits"),
     api("/api/dashboard"),
@@ -259,6 +260,7 @@ async function loadAll() {
     api("/api/usage-records"),
     api("/api/collector-runs"),
     api("/api/github-rate-limit"),
+    api("/api/codex-usage"),
   ]);
   state.dashboard = dashboard;
   state.limits = limits;
@@ -270,6 +272,7 @@ async function loadAll() {
   renderHistory();
   renderCollectorRuns();
   renderGithubRateLimit(githubRateLimit);
+  renderCodexUsage(codexUsage);
 }
 
 async function refreshCollectorRuns() {
@@ -312,6 +315,30 @@ function renderSelects(services, limits) {
   document.querySelector("#limitSelect").innerHTML = limits
     .map((l) => `<option value="${l.id}">#${l.id} ${escapeHtml(l.model_name)} / ${escapeHtml(l.limit_type)}</option>`)
     .join("");
+}
+
+// Codex usage is manual-only: this only reflects the last value the user typed
+// in, never anything fetched from Codex itself.
+function renderCodexUsage(data) {
+  state.codexUsage = data;
+  const lastConfirmedEl = document.querySelector("#codexUsageLastConfirmed");
+  if (!data || !data.available) {
+    lastConfirmedEl.textContent = "最終手動確認: 未入力";
+    return;
+  }
+  const staleSuffix = data.stale ? "（古い可能性があります）" : "";
+  lastConfirmedEl.textContent = `最終手動確認: ${fmtDate(data.observed_at)}${staleSuffix}`;
+
+  const fiveHour = data.five_hour;
+  const weekly = data.weekly;
+  if (fiveHour) {
+    document.querySelector("#codexFiveHourRemaining").value = fiveHour.remaining_percentage;
+    document.querySelector("#codexFiveHourResetsAt").value = toDatetimeLocalValue(fiveHour.resets_at);
+  }
+  if (weekly) {
+    document.querySelector("#codexWeeklyRemaining").value = weekly.remaining_percentage;
+    document.querySelector("#codexWeeklyResetsAt").value = toDatetimeLocalValue(weekly.resets_at);
+  }
 }
 
 function renderDashboard() {
@@ -652,6 +679,54 @@ function initApp() {
     event.target.reset();
     updateUsageModeUi();
     await loadAll();
+  });
+
+  document.querySelector("#codexUsageForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const resultEl = document.querySelector("#codexUsageResult");
+    resultEl.innerHTML = "";
+
+    const data = Object.fromEntries(new FormData(event.target));
+    const fiveHourRemaining = data.five_hour_remaining_percentage;
+    const weeklyRemaining = data.weekly_remaining_percentage;
+
+    const payload = {};
+    if (fiveHourRemaining !== "") {
+      if (!data.five_hour_resets_at) {
+        resultEl.innerHTML = `<div class="codex-usage-error">5時間枠のreset日時を入力してください。</div>`;
+        return;
+      }
+      payload.five_hour = {
+        remaining_percentage: Number(fiveHourRemaining),
+        resets_at: new Date(data.five_hour_resets_at).toISOString(),
+      };
+    }
+    if (weeklyRemaining !== "") {
+      if (!data.weekly_resets_at) {
+        resultEl.innerHTML = `<div class="codex-usage-error">週次枠のreset日時を入力してください。</div>`;
+        return;
+      }
+      payload.weekly = {
+        remaining_percentage: Number(weeklyRemaining),
+        resets_at: new Date(data.weekly_resets_at).toISOString(),
+      };
+    }
+    if (!payload.five_hour && !payload.weekly) {
+      resultEl.innerHTML = `<div class="codex-usage-error">5時間枠・週次枠のどちらかは入力してください。</div>`;
+      return;
+    }
+
+    const submitButton = document.querySelector("#codexUsageSubmit");
+    submitButton.disabled = true;
+    try {
+      const snapshot = await api("/api/codex-usage", { method: "PUT", body: JSON.stringify(payload) });
+      renderCodexUsage(snapshot);
+      resultEl.innerHTML = `<div class="codex-usage-success">保存しました。</div>`;
+    } catch (error) {
+      resultEl.innerHTML = `<div class="codex-usage-error">${escapeHtml(error.message)}</div>`;
+    } finally {
+      submitButton.disabled = false;
+    }
   });
 
   document.querySelector("#collectorForm").addEventListener("submit", async (event) => {

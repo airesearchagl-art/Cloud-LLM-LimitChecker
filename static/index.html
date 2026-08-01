@@ -110,6 +110,44 @@
         </div>
       </section>
 
+      <section>
+        <div class="panel" id="codexUsagePanel">
+          <div class="panel-heading">
+            <h2>Codex Usage（手動入力）</h2>
+            <span id="codexUsageLastConfirmed" class="muted">最終手動確認: -</span>
+          </div>
+          <p class="form-note">
+            Codexで /status または公式Usage画面で確認した値を入力してください。自動取得ではありません。
+          </p>
+          <form id="codexUsageForm" class="codex-usage-form">
+            <fieldset class="codex-usage-fieldset">
+              <legend>5時間枠</legend>
+              <label>
+                <span>残り%</span>
+                <input id="codexFiveHourRemaining" name="five_hour_remaining_percentage" type="number" step="0.01" min="0" max="100" placeholder="例: 60" />
+              </label>
+              <label>
+                <span>reset日時（ローカル時刻）</span>
+                <input id="codexFiveHourResetsAt" name="five_hour_resets_at" type="datetime-local" />
+              </label>
+            </fieldset>
+            <fieldset class="codex-usage-fieldset">
+              <legend>週次枠</legend>
+              <label>
+                <span>残り%</span>
+                <input id="codexWeeklyRemaining" name="weekly_remaining_percentage" type="number" step="0.01" min="0" max="100" placeholder="例: 80" />
+              </label>
+              <label>
+                <span>reset日時（ローカル時刻）</span>
+                <input id="codexWeeklyResetsAt" name="weekly_resets_at" type="datetime-local" />
+              </label>
+            </fieldset>
+            <button id="codexUsageSubmit" type="submit">Codex Usageを保存</button>
+            <div id="codexUsageResult" class="codex-usage-result-slot"></div>
+          </form>
+        </div>
+      </section>
+
       <section class="grid">
         <form id="serviceForm" class="panel">
           <h2>サービス登録</h2>

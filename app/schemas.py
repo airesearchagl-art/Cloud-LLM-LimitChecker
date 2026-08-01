@@ -153,6 +153,54 @@ class ClaudeCodeUsageSnapshot(BaseModel):
     error_message: str | None
 
 
+class CodexUsageWindow(BaseModel):
+    used_percentage: float
+    remaining_percentage: float
+    resets_at: str
+
+
+class CodexUsageSnapshot(BaseModel):
+    available: bool
+    stale: bool
+    status: str
+    observed_at: str | None
+    source: str | None
+    five_hour: CodexUsageWindow | None
+    weekly: CodexUsageWindow | None
+    error_message: str | None
+
+
+class CodexUsageWindowInput(BaseModel):
+    remaining_percentage: float
+    resets_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_bool_remaining_percentage(cls, data: object) -> object:
+        if isinstance(data, dict) and isinstance(data.get("remaining_percentage"), bool):
+            raise ValueError("remaining_percentage must not be a boolean")
+        return data
+
+    @model_validator(mode="after")
+    def validate_window_input(self) -> "CodexUsageWindowInput":
+        if not (0 <= self.remaining_percentage <= 100):
+            raise ValueError("remaining_percentage must be between 0 and 100")
+        if self.resets_at.tzinfo is None or self.resets_at.tzinfo.utcoffset(self.resets_at) is None:
+            raise ValueError("resets_at must be timezone-aware")
+        return self
+
+
+class CodexUsageInput(BaseModel):
+    five_hour: CodexUsageWindowInput | None = None
+    weekly: CodexUsageWindowInput | None = None
+
+    @model_validator(mode="after")
+    def validate_at_least_one_window(self) -> "CodexUsageInput":
+        if self.five_hour is None and self.weekly is None:
+            raise ValueError("at least one of five_hour or weekly is required")
+        return self
+
+
 class CollectorRunRead(BaseModel):
     id: int
     vendor: str

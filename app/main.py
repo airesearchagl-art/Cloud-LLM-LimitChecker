@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas
 from app.calculations import alert_items, limit_to_dashboard
 from app.claude_code_usage_cache import load_snapshot as load_claude_code_usage_snapshot
+from app import codex_usage_cache
 from app.collectors.importer import CollectorImportError, import_normalized_records
 from app.collectors.claude_collector import (
     ClaudeCollectorConfigError,
@@ -474,6 +475,43 @@ def refresh_github_rate_limit() -> dict:
 def get_claude_code_usage() -> dict:
     """Read-only load of the local statusLine bridge cache. Never runs Claude Code, never calls out."""
     return load_claude_code_usage_snapshot(now=_current_utc_time())
+
+
+def _codex_window_input_to_record(window: schemas.CodexUsageWindowInput | None) -> dict | None:
+    if window is None:
+        return None
+    # used_percentage is always derived server-side; the input schema has no
+    # such field, so the user can never submit an inconsistent pair.
+    return {
+        "used_percentage": 100.0 - window.remaining_percentage,
+        "remaining_percentage": window.remaining_percentage,
+        "resets_at": window.resets_at.isoformat(),
+    }
+
+
+@app.get("/api/codex-usage", response_model=schemas.CodexUsageSnapshot)
+def get_codex_usage() -> dict:
+    """Read-only load of the manually saved Codex usage snapshot. Never runs Codex, never calls out."""
+    return codex_usage_cache.load_snapshot(now=_current_utc_time())
+
+
+@app.put("/api/codex-usage", response_model=schemas.CodexUsageSnapshot)
+def put_codex_usage(payload: schemas.CodexUsageInput) -> dict:
+    """Save a manually-entered Codex usage snapshot. Never runs Codex, never calls out."""
+    now = _current_utc_time()
+    record = {
+        "schema_version": codex_usage_cache.SCHEMA_VERSION,
+        "source": codex_usage_cache.SOURCE_NAME,
+        "observed_at": now.isoformat(),
+        "five_hour": _codex_window_input_to_record(payload.five_hour),
+        "weekly": _codex_window_input_to_record(payload.weekly),
+    }
+    try:
+        validated = codex_usage_cache.validate_cache_record(record, now=now)
+    except codex_usage_cache.CacheValidationError as exc:
+        raise HTTPException(status_code=400, detail="invalid Codex usage input") from exc
+    codex_usage_cache.write_cache_atomic(validated, codex_usage_cache.resolve_cache_path())
+    return codex_usage_cache.load_snapshot(now=now)
 
 
 @app.get("/compact", include_in_schema=False)
