@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ServiceCreate(BaseModel):
@@ -171,15 +171,24 @@ class CodexUsageSnapshot(BaseModel):
 
 
 class CodexUsageWindowInput(BaseModel):
+    # extra="forbid" rejects any field beyond the two documented here (in
+    # particular `used_percentage`, which the server always derives itself
+    # and must never accept from the client) instead of silently ignoring it.
+    model_config = ConfigDict(extra="forbid")
+
     remaining_percentage: float
     resets_at: datetime
 
-    @model_validator(mode="before")
+    @field_validator("remaining_percentage", mode="before")
     @classmethod
-    def reject_bool_remaining_percentage(cls, data: object) -> object:
-        if isinstance(data, dict) and isinstance(data.get("remaining_percentage"), bool):
-            raise ValueError("remaining_percentage must not be a boolean")
-        return data
+    def reject_non_numeric_remaining_percentage(cls, value: object) -> object:
+        # Deliberately stricter than Pydantic's default lax-float coercion,
+        # which would otherwise accept numeric strings like "42" or "42.0" —
+        # this field only ever accepts an actual int/float, matching the
+        # manual-entry-only contract documented for this endpoint.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("remaining_percentage must be an int or float (not bool, str, null, list, or dict)")
+        return value
 
     @model_validator(mode="after")
     def validate_window_input(self) -> "CodexUsageWindowInput":
@@ -191,6 +200,12 @@ class CodexUsageWindowInput(BaseModel):
 
 
 class CodexUsageInput(BaseModel):
+    # extra="forbid" rejects any unexpected top-level field (e.g. `source`,
+    # `observed_at`, or an arbitrary field like `token`) instead of silently
+    # ignoring it — both windows are always server-normalized, never passed
+    # through from client input.
+    model_config = ConfigDict(extra="forbid")
+
     five_hour: CodexUsageWindowInput | None = None
     weekly: CodexUsageWindowInput | None = None
 

@@ -461,6 +461,151 @@ def test_put_codex_usage_rejects_remaining_non_numeric_string(
     assert response.status_code == 422
 
 
+# strict validation: remaining_percentage accepts only bool-excluded int/float,
+# never a numeric string, empty string, null, list, or dict — for both windows.
+STRICT_REJECT_CASES = [
+    ("numeric_string_int", "42"),
+    ("numeric_string_float", "42.0"),
+    ("empty_string", ""),
+    ("null", None),
+    ("bool_true", True),
+    ("bool_false", False),
+    ("list", [42]),
+    ("dict", {"value": 42}),
+]
+STRICT_REJECT_IDS = [case[0] for case in STRICT_REJECT_CASES]
+
+
+@pytest.mark.parametrize("label,bad_value", STRICT_REJECT_CASES, ids=STRICT_REJECT_IDS)
+def test_put_codex_usage_five_hour_rejects_non_numeric_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, bad_value: object
+) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+
+    with TestClient(app) as client:
+        response = _put(
+            client, {"five_hour": {"remaining_percentage": bad_value, "resets_at": "2026-01-01T17:00:00+00:00"}}
+        )
+
+    assert response.status_code == 422, label
+
+
+@pytest.mark.parametrize("label,bad_value", STRICT_REJECT_CASES, ids=STRICT_REJECT_IDS)
+def test_put_codex_usage_weekly_rejects_non_numeric_types(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, bad_value: object
+) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+
+    with TestClient(app) as client:
+        response = _put(
+            client, {"weekly": {"remaining_percentage": bad_value, "resets_at": "2026-01-08T00:00:00+00:00"}}
+        )
+
+    assert response.status_code == 422, label
+
+
+# int 0 / int 100 / float 42.5 are all accepted (bool-excluded int or float only)
+def test_put_codex_usage_accepts_plain_int_zero(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+    monkeypatch.setattr("app.main._current_utc_time", lambda: NOW)
+
+    with TestClient(app) as client:
+        response = _put(client, {"five_hour": {"remaining_percentage": 0, "resets_at": "2026-01-01T17:00:00+00:00"}})
+
+    assert response.status_code == 200, response.text
+
+
+def test_put_codex_usage_accepts_plain_int_hundred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+    monkeypatch.setattr("app.main._current_utc_time", lambda: NOW)
+
+    with TestClient(app) as client:
+        response = _put(
+            client, {"five_hour": {"remaining_percentage": 100, "resets_at": "2026-01-01T17:00:00+00:00"}}
+        )
+
+    assert response.status_code == 200, response.text
+
+
+def test_put_codex_usage_accepts_float(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+    monkeypatch.setattr("app.main._current_utc_time", lambda: NOW)
+
+    with TestClient(app) as client:
+        response = _put(
+            client, {"five_hour": {"remaining_percentage": 42.5, "resets_at": "2026-01-01T17:00:00+00:00"}}
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["five_hour"]["remaining_percentage"] == 42.5
+
+
+# rootの未定義field / token風fieldを422
+def test_put_codex_usage_rejects_unknown_root_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+
+    with TestClient(app) as client:
+        response = _put(
+            client,
+            {
+                "five_hour": {"remaining_percentage": 60.0, "resets_at": "2026-01-01T17:00:00+00:00"},
+                "source": "codex_manual",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_put_codex_usage_rejects_token_like_root_field(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+
+    with TestClient(app) as client:
+        response = _put(
+            client,
+            {
+                "five_hour": {"remaining_percentage": 60.0, "resets_at": "2026-01-01T17:00:00+00:00"},
+                "token": "sk-ant-api03-SHOULD-NEVER-BE-ACCEPTED",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+# token風値をレスポンスへ出さない(未定義fieldの値としてtoken風文字列を送っても本文へ反映しない)
+def test_put_codex_usage_error_response_never_echoes_token_like_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+    secret_marker = "sk-ant-api03-SHOULD-NEVER-LEAK-INTO-RESPONSE"
+
+    with TestClient(app) as client:
+        response = _put(
+            client,
+            {
+                "five_hour": {"remaining_percentage": 60.0, "resets_at": "2026-01-01T17:00:00+00:00"},
+                "token": secret_marker,
+            },
+        )
+
+    assert response.status_code == 422
+    assert secret_marker not in response.text
+
+
+def test_put_codex_usage_error_response_never_echoes_rejected_window_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
+    secret_marker = "sk-ant-api03-SHOULD-NEVER-LEAK-INTO-RESPONSE"
+
+    with TestClient(app) as client:
+        response = _put(
+            client, {"five_hour": {"remaining_percentage": secret_marker, "resets_at": "2026-01-01T17:00:00+00:00"}}
+        )
+
+    assert response.status_code == 422
+    assert secret_marker not in response.text
+
+
 # 10. usedをサーバー側で計算
 def test_put_codex_usage_computes_used_percentage_server_side(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -484,11 +629,10 @@ def test_put_codex_usage_computes_used_percentage_server_side(
 
 # used_percentage passed by the client must simply be ignored/rejected as an unknown field,
 # never trusted over the server-computed value.
-def test_put_codex_usage_ignores_client_supplied_used_percentage(
+def test_put_codex_usage_rejects_client_supplied_used_percentage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("app.codex_usage_cache.resolve_cache_path", lambda env=None: tmp_path / "codex-usage.json")
-    monkeypatch.setattr("app.main._current_utc_time", lambda: NOW)
 
     with TestClient(app) as client:
         response = _put(
@@ -496,14 +640,13 @@ def test_put_codex_usage_ignores_client_supplied_used_percentage(
             {
                 "five_hour": {
                     "remaining_percentage": 63.0,
-                    "used_percentage": 1.0,  # attacker-controlled value, must be ignored
+                    "used_percentage": 1.0,  # attacker-controlled value, must be rejected outright
                     "resets_at": "2026-01-01T17:00:00+00:00",
                 }
             },
         )
 
-    assert response.status_code == 200, response.text
-    assert response.json()["five_hour"]["used_percentage"] == 37.0
+    assert response.status_code == 422
 
 
 # 11. resetがnaive

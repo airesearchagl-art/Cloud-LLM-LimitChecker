@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -133,6 +135,21 @@ app.state.github_rate_limit_controller = GitHubRateLimitController()
 
 def _current_utc_time() -> datetime:
     return datetime.now(timezone.utc)
+
+
+# Codex usage input is user-typed (never a stored secret), but a mistyped
+# value pasted into the wrong field could still be something sensitive-looking.
+# FastAPI/Pydantic's default 422 body echoes the raw offending value back in
+# each error's `input` (and sometimes `ctx`) — harmless for every other
+# endpoint in this app, but specifically avoided here per this endpoint's own
+# "never echo raw input" contract. Every other route keeps the default
+# behavior unchanged.
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    if request.url.path != "/api/codex-usage":
+        return await request_validation_exception_handler(request, exc)
+    sanitized = [{"type": error.get("type"), "loc": error.get("loc"), "msg": error.get("msg")} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": sanitized})
 
 
 @app.get("/api/health")
