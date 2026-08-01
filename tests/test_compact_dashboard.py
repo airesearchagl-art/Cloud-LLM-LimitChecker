@@ -412,3 +412,85 @@ def test_claude_usage_window_reset_overdue_shows_no_negative_number() -> None:
     html = run_compact_js(f'compact.claudeUsageWindowHtml({json.dumps("5時間枠")}, {json.dumps(window)})')
     assert "reset時刻超過" in html
     assert not re.search(r"-\d", html)
+
+
+CODEX_USAGE_AVAILABLE = {
+    "available": True,
+    "stale": False,
+    "status": "ok",
+    "observed_at": "2026-01-01T12:00:00+00:00",
+    "source": "codex_manual",
+    "five_hour": {"used_percentage": 40.0, "remaining_percentage": 60.0, "resets_at": "2999-01-01T00:00:00+00:00"},
+    "weekly": {"used_percentage": 20.0, "remaining_percentage": 80.0, "resets_at": "2999-01-08T00:00:00+00:00"},
+    "error_message": None,
+}
+
+
+# 27. /compactで5時間枠表示 / 28. /compactで週次枠表示 / 29.「手動確認値」表示
+def test_codex_usage_section_shows_five_hour_and_weekly_with_manual_badge() -> None:
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(CODEX_USAGE_AVAILABLE)})")
+    assert "5時間枠" in html
+    assert "週次枠" in html
+    assert "60%" in html  # 5h remaining
+    assert "40%" in html  # 5h used
+    assert "80%" in html  # weekly remaining
+    assert "20%" in html  # weekly used
+    assert html.count("手動確認値") == 2
+
+
+# 30. 未入力表示
+def test_codex_usage_section_not_observed_shows_manual_input_guidance() -> None:
+    html = run_compact_js('compact.codexUsageSectionHtml({available: false, status: "not_observed"})')
+    assert "Codex /statusで確認後に手動入力" in html
+
+
+# 31. stale表示
+def test_codex_usage_section_shows_stale_notice() -> None:
+    data = {**CODEX_USAGE_AVAILABLE, "stale": True, "status": "stale"}
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(data)})")
+    assert "最終手動確認値" in html
+    assert "古い可能性があります" in html
+
+
+# 32. invalid cache表示
+def test_codex_usage_section_invalid_cache_shows_unavailable() -> None:
+    html = run_compact_js('compact.codexUsageSectionHtml({available: false, status: "invalid_cache"})')
+    assert "取得不可" in html
+
+
+# 33. reset超過で負数を出さず、古いpercentageを強調表示しない
+def test_codex_usage_window_reset_overdue_hides_percentage_and_shows_no_negative_number() -> None:
+    window = {"used_percentage": 90.0, "remaining_percentage": 10.0, "resets_at": "2000-01-01T00:00:00+00:00"}
+    html = run_compact_js(f'compact.codexUsageWindowHtml({json.dumps("5時間枠")}, {json.dumps(window)})')
+    assert "reset時刻超過" in html
+    assert not re.search(r"-\d", html)
+    assert "90%" not in html
+    assert "compact-percent-value" not in html
+
+
+# 週次だけ未入力の場合はその枠だけ「未入力」
+def test_codex_usage_section_shows_partial_window_as_unentered() -> None:
+    data = {**CODEX_USAGE_AVAILABLE, "weekly": None}
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(data)})")
+    assert "5時間枠" in html
+    assert "40%" in html
+    assert "未入力" in html
+
+
+# 34/35. ページロード時にPUTなし・GETのみ(codex-usageも含めてsubprocess未実行)
+def test_compact_page_load_never_calls_subprocess_for_codex_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    def explode(*args, **kwargs):
+        raise AssertionError("/compact page-load endpoints must never invoke a subprocess for Codex usage")
+
+    monkeypatch.setattr(subprocess, "run", explode)
+    monkeypatch.setattr(subprocess, "Popen", explode)
+
+    with TestClient(app) as client:
+        assert client.get("/compact").status_code == 200
+        assert client.get("/api/codex-usage").status_code == 200
+
+
+def test_compact_js_never_invokes_codex_or_a_child_process() -> None:
+    js = COMPACT_JS.read_text(encoding="utf-8")
+    for marker in ("codex exec", "child_process", "spawn(", "execSync", "codex.exe"):
+        assert marker not in js

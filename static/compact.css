@@ -253,6 +253,11 @@ body {
   background: #38bdf8;
 }
 
+/* Codex Usageは手動入力のため、Claude Code(push型)とも既存statusとも異なる色で区別する。 */
+.compact-meter-fill.compact-codex-usage {
+  background: #a78bfa;
+}
+
 .compact-meta-row {
   border-top: 1px solid #2a3540;
   color: #768692;

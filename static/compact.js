@@ -4,6 +4,7 @@ const state = {
   dashboard: [],
   github: null,
   claudeCodeUsage: null,
+  codexUsage: null,
 };
 
 async function fetchJson(path) {
@@ -281,6 +282,65 @@ function claudeCodeSectionHtml(data) {
   `;
 }
 
+// DOMに触れない純粋関数: Codex Usage手動入力キャッシュ1枠分(5時間 or 週次)のカードHTMLを組み立てる。
+// remaining/usedは管理画面での保存時に既に0-100%へ検証済みの値のみを渡される想定。
+// resets_atを過ぎている場合は、古いpercentageを現在値のように強調表示せず「reset時刻超過」だけを示す。
+function codexUsageWindowHtml(label, window) {
+  if (!window) {
+    return `
+      <article class="compact-card">
+        <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
+        <div class="compact-no-limit">未入力</div>
+      </article>`;
+  }
+  const resetText = resetRelativeText(window.resets_at);
+  const resetExceeded = resetText === "reset時刻超過";
+  const bodyBlock = resetExceeded
+    ? `<div class="compact-no-limit">reset時刻超過</div>`
+    : (() => {
+        const width = Math.min(Math.max(window.used_percentage, 0), 100);
+        return `
+          <div class="compact-percent-row">
+            <span class="compact-percent-label">残り</span>
+            <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(window.remaining_percentage)}%</span>
+          </div>
+          <div class="compact-usage-line">使用済み ${fmtNumber(window.used_percentage)}%</div>
+          <div class="compact-meter"><div class="compact-meter-fill compact-codex-usage" style="width:${width}%"></div></div>
+        `;
+      })();
+  return `
+    <article class="compact-card">
+      <div class="compact-card-head">
+        <span class="compact-service-name">${escapeHtml(label)}</span>
+        <span class="compact-source-badge">手動確認値</span>
+      </div>
+      ${bodyBlock}
+      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
+    </article>`;
+}
+
+// DOMに触れない純粋関数: GET /api/codex-usage のレスポンスからセクションHTMLを組み立てる。
+// 自動取得ではなく手動入力のため、staleは「最終手動確認値が古い可能性がある」という意味で表示する。
+function codexUsageSectionHtml(data) {
+  if (!data || !data.available) {
+    const message = data && data.status === "invalid_cache" ? "取得不可" : "Codex /statusで確認後に手動入力";
+    return `<div class="compact-card compact-empty">Codex Usage: ${message}</div>`;
+  }
+
+  const staleNoticeHtml = data.stale
+    ? `<div class="compact-stale-notice">最終手動確認値・古い可能性があります</div>`
+    : "";
+
+  return `
+    ${staleNoticeHtml}
+    <div class="compact-github-grid-inner">
+      ${codexUsageWindowHtml("5時間枠", data.five_hour)}
+      ${codexUsageWindowHtml("週次枠", data.weekly)}
+    </div>
+    <div class="compact-stale-notice">最終手動確認: ${fmtDateOrUnknown(data.observed_at)}</div>
+  `;
+}
+
 function renderLastRendered() {
   document.querySelector("#lastRenderedAt").textContent = `最終描画: ${new Date().toLocaleString("ja-JP")}`;
 }
@@ -301,21 +361,29 @@ function renderClaudeCodeUsage(data) {
   document.querySelector("#claudeCodeUsageCards").innerHTML = claudeCodeSectionHtml(data);
 }
 
-// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage はいずれも保存済みの値を
-// 返すだけで、gh api rate_limitやClaude Codeの起動などの外部コマンド/APIをここから直接実行することはない。
+function renderCodexUsage(data) {
+  document.querySelector("#codexUsageCards").innerHTML = codexUsageSectionHtml(data);
+}
+
+// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・/api/codex-usage はいずれも
+// 保存済みの値を返すだけで、gh api rate_limitやClaude Code/Codexの起動などの外部コマンド/APIを
+// ここから直接実行することはない。
 async function loadCompact() {
   try {
-    const [dashboard, github, claudeCodeUsage] = await Promise.all([
+    const [dashboard, github, claudeCodeUsage, codexUsage] = await Promise.all([
       fetchJson("/api/dashboard"),
       fetchJson("/api/github-rate-limit"),
       fetchJson("/api/claude-code-usage"),
+      fetchJson("/api/codex-usage"),
     ]);
     state.dashboard = dashboard;
     state.github = github;
     state.claudeCodeUsage = claudeCodeUsage;
+    state.codexUsage = codexUsage;
     renderLimitCards(dashboard);
     renderGithubSection(github);
     renderClaudeCodeUsage(claudeCodeUsage);
+    renderCodexUsage(codexUsage);
   } catch (error) {
     document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
   } finally {
@@ -354,5 +422,7 @@ if (typeof module !== "undefined") {
     githubSectionHtml,
     claudeUsageWindowHtml,
     claudeCodeSectionHtml,
+    codexUsageWindowHtml,
+    codexUsageSectionHtml,
   };
 }
