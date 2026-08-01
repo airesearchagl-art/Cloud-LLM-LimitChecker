@@ -613,6 +613,76 @@ button:hover {
   padding: 8px 12px;
 }
 
+.github-limited-banner {
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+}
+
+.github-limited-banner-badge {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+.github-limited-banner-cause {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.github-limited-banner-subtext {
+  flex-basis: 100%;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.github-banner-limited {
+  background: #ffd7d7;
+  color: #9d1919;
+}
+
+.github-banner-limited .github-limited-banner-badge {
+  background: #9d1919;
+  color: #fff;
+}
+
+.github-banner-overdue {
+  background: #ffe6c7;
+  color: #8a4b00;
+}
+
+.github-banner-overdue .github-limited-banner-badge {
+  background: #8a4b00;
+  color: #fff;
+}
+
+.github-banner-stale {
+  background: #e6eaed;
+  color: #46545c;
+}
+
+.github-banner-stale .github-limited-banner-badge {
+  background: #46545c;
+  color: #fff;
+}
+
+.github-banner-secondary {
+  background: #e6d7ff;
+  color: #4b1d9d;
+}
+
+.github-banner-secondary .github-limited-banner-badge {
+  background: #4b1d9d;
+  color: #fff;
+}
+
 .github-error {
   background: #fff4f4;
   border-left: 4px solid #c62828;

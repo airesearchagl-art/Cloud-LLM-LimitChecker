@@ -166,6 +166,8 @@ function githubResourceCardHtml(resource) {
 
 // DOMに触れない純粋関数: reset後の1回限定自動再取得に関する補助表示。
 // next_auto_refresh_atが過去でも負数のカウントダウンは表示しない。
+// ここでの「次回」はアプリ自身が次にgh api rate_limitを叩くタイミングであり、
+// GitHub側の制限解除予定(reset時刻)ではない — 文言でも両者を混同しない。
 function githubAutoRefreshNoticeHtml(data) {
   if (!data) return "";
   if (data.refreshing) {
@@ -174,12 +176,86 @@ function githubAutoRefreshNoticeHtml(data) {
   if (data.auto_refresh_pending && data.next_auto_refresh_at) {
     const secondsUntil = Math.floor((new Date(data.next_auto_refresh_at).getTime() - Date.now()) / 1000);
     const relative = Number.isNaN(secondsUntil) ? "" : secondsUntil > 0 ? `（${fmtSecondsUntilReset(secondsUntil)}）` : "（まもなく）";
-    return `<p class="muted">reset後に1回だけ自動確認します。次回自動確認予定: ${fmtGithubDate(data.next_auto_refresh_at)}${relative}</p>`;
+    return `<p class="muted">reset後に1回だけ、アプリが自動で再取得します。アプリの次回取得予定: ${fmtGithubDate(data.next_auto_refresh_at)}${relative}</p>`;
   }
   if (data.last_auto_refresh_error) {
     return `<p class="muted">自動再取得に失敗しました: ${escapeHtml(data.last_auto_refresh_error.user_message || "")}</p>`;
   }
   return "";
+}
+
+// DOMに触れない純粋関数: Overallが"Limited"のとき、原因がcore/graphqlのどちらで、
+// Exhausted(枠を使い切った)なのかReset overdue(reset時刻を過ぎたのに未更新)なのかを判定する。
+// Overall判定自体(app/github_rate_limit.py)は変更せず、表示上の区別だけをここで行う。
+// 表示優先順位はバックエンドのdetermine_overallの重大度順(Reset overdue > Exhausted)とは
+// 独立に決めている: Exhaustedが1件でもあればRATE LIMITEDを優先して表示し、Exhaustedが
+// 無い場合に限りRESET OVERDUEを表示する(枠を使い切っている方が利用者への影響が大きいため)。
+// 同一status同士がtieする場合はcoreを優先する
+// (バックエンドのdetermine_overallの同点時tie-break "core"と表示を一致させるため)。
+function githubLimitedCause(resources) {
+  if (!resources) return null;
+  const core = resources.core;
+  const graphql = resources.graphql;
+  if (core && core.status === "Exhausted") return { resource: "core", variant: "rate_limited" };
+  if (graphql && graphql.status === "Exhausted") return { resource: "graphql", variant: "rate_limited" };
+  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
+  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
+  return null;
+}
+
+// DOMに触れない純粋関数: RATE LIMITED / RESET OVERDUEバナーを組み立てる。
+// staleはfalseなら現在fetch成功時点、trueならlast_known(直近取得失敗時の最終成功値)を指す —
+// 「今まさに制限中」と「最終確認時点では制限中だった」を文言・スタイルの両方で区別する。
+function githubLimitedBannerHtml(overall, resources, stale) {
+  if (!overall || overall.status !== "Limited") return "";
+  const cause = githubLimitedCause(resources);
+  const variant = cause ? cause.variant : "rate_limited";
+  const causeLabel = cause ? githubResourceLabel(cause.resource) : "";
+  const isOverdue = variant === "reset_overdue";
+
+  const badgeText = stale
+    ? isOverdue
+      ? "LAST KNOWN: RESET OVERDUE"
+      : "LAST KNOWN: RATE LIMITED"
+    : isOverdue
+      ? "RESET OVERDUE"
+      : "RATE LIMITED";
+
+  const subtext = stale
+    ? isOverdue
+      ? "最終確認時点でreset時刻を経過していましたが、新しい値は未取得です（現在の状態ではありません）"
+      : "最終確認時点では制限中でした（現在の状態ではありません）"
+    : isOverdue
+      ? "reset時刻を過ぎていますが、まだ新しい値を取得できていません。"
+      : "利用枠の上限に達しています。";
+
+  const cls = [
+    "github-limited-banner",
+    isOverdue ? "github-banner-overdue" : "github-banner-limited",
+    stale ? "github-banner-stale" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return `
+    <div class="${cls}">
+      <span class="github-limited-banner-badge">${escapeHtml(badgeText)}</span>
+      ${causeLabel ? `<span class="github-limited-banner-cause">${escapeHtml(causeLabel)}</span>` : ""}
+      <div class="github-limited-banner-subtext">${escapeHtml(subtext)}</div>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: secondary rate limitはcore/graphql/searchのいずれの
+// resource状態でもなく、gh api rate_limit自体の呼び出しが失敗した状態(data.error)
+// なので、primary resource枯渇のRATE LIMITEDバナーとは別要素として表示する。
+// primary resourceのreset時刻は流用しない(そもそも保持していない)。
+function githubSecondaryRateLimitBannerHtml(data) {
+  if (!data || !data.error || data.error.error_type !== "secondary_rate_limit") return "";
+  return `
+    <div class="github-limited-banner github-banner-secondary">
+      <span class="github-limited-banner-badge">SECONDARY RATE LIMIT</span>
+      <div class="github-limited-banner-subtext">${escapeHtml(data.error.user_message || "")}</div>
+    </div>`;
 }
 
 // DOMに触れない純粋関数: GET/POST /api/github-rate-limit のレスポンスからHTML文字列を組み立てる。
@@ -192,9 +268,11 @@ function githubRateLimitHtml(data) {
   const displayResources = data.fetched ? data.resources : usingLastKnown ? data.last_known.resources : null;
   const displayOverall = data.fetched ? data.overall : usingLastKnown ? data.last_known.overall : null;
 
-  const errorHtml = data.error
+  // secondary rate limitは専用バナーで表示するため、汎用エラー表示とは重複させない。
+  const errorHtml = data.error && data.error.error_type !== "secondary_rate_limit"
     ? `<div class="github-error">${escapeHtml(data.error.user_message || "取得に失敗しました")}</div>`
     : "";
+  const secondaryRateLimitHtml = githubSecondaryRateLimitBannerHtml(data);
 
   const staleNoticeHtml = usingLastKnown
     ? `<p class="muted">直近の取得は失敗しました。以下は${escapeHtml(fmtGithubDate(data.last_known.collected_at))}時点の古い情報（未更新）です。</p>`
@@ -206,16 +284,20 @@ function githubRateLimitHtml(data) {
     return `
       <p class="muted">状態: 未取得</p>
       ${errorHtml}
+      ${secondaryRateLimitHtml}
       ${autoRefreshNoticeHtml}`;
   }
 
   const overallHtml = displayOverall
     ? `<div class="github-overall ${githubOverallClass(displayOverall.status)}">Overall: ${escapeHtml(displayOverall.status)} — ${escapeHtml(displayOverall.reason)}</div>`
     : "";
+  const limitedBannerHtml = githubLimitedBannerHtml(displayOverall, displayResources, usingLastKnown);
 
   return `
     ${errorHtml}
+    ${secondaryRateLimitHtml}
     ${staleNoticeHtml}
+    ${limitedBannerHtml}
     ${overallHtml}
     ${autoRefreshNoticeHtml}
     <div class="github-resource-cards">
@@ -992,6 +1074,9 @@ if (typeof module !== "undefined") {
     githubResourceCardHtml,
     githubRateLimitHtml,
     githubAutoRefreshNoticeHtml,
+    githubLimitedCause,
+    githubLimitedBannerHtml,
+    githubSecondaryRateLimitBannerHtml,
     codexRateLimitsErrorDisplay,
   };
 }

@@ -208,19 +208,102 @@ function githubOverallHtml(overall) {
   return `<div class="compact-github-overall ${cls}">GitHub Overall: ${escapeHtml(overall.status)}${reason}</div>`;
 }
 
+// DOMに触れない純粋関数: app.jsのgithubLimitedCauseと同一ロジック。
+// Overall判定(app/github_rate_limit.py)には触れず、core/graphqlのresource statusから
+// Exhausted(枠を使い切った)かReset overdue(reset時刻経過後も未更新)かを表示用に区別する。
+// 表示優先順位はバックエンドの重大度順(Reset overdue > Exhausted)とは独立に決めている:
+// Exhaustedが1件でもあればRATE LIMITEDを優先表示し、Exhaustedが無い場合のみRESET OVERDUEを
+// 表示する。同一status同士がtieする場合はcoreを優先し、determine_overallのtie-breakと一致させる。
+function githubLimitedCause(resources) {
+  if (!resources) return null;
+  const core = resources.core;
+  const graphql = resources.graphql;
+  if (core && core.status === "Exhausted") return { resource: "core", variant: "rate_limited" };
+  if (graphql && graphql.status === "Exhausted") return { resource: "graphql", variant: "rate_limited" };
+  if (core && core.status === "Reset overdue") return { resource: "core", variant: "reset_overdue" };
+  if (graphql && graphql.status === "Reset overdue") return { resource: "graphql", variant: "reset_overdue" };
+  return null;
+}
+
+// DOMに触れない純粋関数: app.jsのgithubLimitedBannerHtmlと同一の区別ルールをcompact向けに描画する。
+// stale=trueは/api/github-rate-limitのlast_known(直近取得失敗時の最終成功値)由来を意味し、
+// 「今まさに制限中」と「最終確認時点では制限中だった」を文言・スタイルの両方で区別する。
+function githubLimitedBannerHtml(overall, resources, stale) {
+  if (!overall || overall.status !== "Limited") return "";
+  const cause = githubLimitedCause(resources);
+  const variant = cause ? cause.variant : "rate_limited";
+  const causeLabel = cause ? githubResourceLabel(cause.resource) : "";
+  const isOverdue = variant === "reset_overdue";
+
+  const badgeText = stale
+    ? isOverdue
+      ? "LAST KNOWN: RESET OVERDUE"
+      : "LAST KNOWN: RATE LIMITED"
+    : isOverdue
+      ? "RESET OVERDUE"
+      : "RATE LIMITED";
+
+  const cls = [
+    "compact-github-limited-banner",
+    isOverdue ? "compact-banner-overdue" : "compact-banner-limited",
+    stale ? "compact-banner-stale" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return `<div class="${cls}"><span class="compact-github-limited-badge">${escapeHtml(badgeText)}</span>${causeLabel ? ` ${escapeHtml(causeLabel)}` : ""}</div>`;
+}
+
+// DOMに触れない純粋関数: app.jsのgithubSecondaryRateLimitBannerHtmlと同一ルール。
+// secondary rate limitはprimary resourceの枯渇とは別要因(gh api rate_limit自体の呼び出し失敗)
+// なので、primary resourceのreset時刻は流用せず、専用バナーとして分けて表示する。
+function githubSecondaryRateLimitBannerHtml(data) {
+  if (!data || !data.error || data.error.error_type !== "secondary_rate_limit") return "";
+  return `<div class="compact-github-limited-banner compact-banner-secondary"><span class="compact-github-limited-badge">SECONDARY RATE LIMIT</span></div>`;
+}
+
+// DOMに触れない純粋関数: app.jsのgithubAutoRefreshNoticeHtmlと同一ルール。
+// ここでの「次回」はアプリ自身が次にgh api rate_limitを叩くタイミングであり、GitHub側の
+// 制限解除予定(reset時刻)ではない — /compactでも文言でこの区別を保つ。
+// next_auto_refresh_atが過去でも負数のカウントダウンは表示しない(resetRelativeTextが吸収)。
+function githubAutoRefreshNoticeHtml(data) {
+  if (!data) return "";
+  if (data.refreshing) {
+    return `<div class="compact-auto-refresh-notice">自動確認中…</div>`;
+  }
+  if (data.auto_refresh_pending && data.next_auto_refresh_at) {
+    const relative = resetRelativeText(data.next_auto_refresh_at);
+    const relativeSuffix = relative === "reset時刻超過" ? "（まもなく）" : `（${relative}）`;
+    return `<div class="compact-auto-refresh-notice">アプリの次回取得予定: ${fmtDateOrUnknown(data.next_auto_refresh_at)}${relativeSuffix}</div>`;
+  }
+  if (data.last_auto_refresh_error) {
+    return `<div class="compact-auto-refresh-notice">自動再取得に失敗しました: ${escapeHtml(data.last_auto_refresh_error.user_message || "")}</div>`;
+  }
+  return "";
+}
+
 // DOMに触れない純粋関数: GET /api/github-rate-limit のレスポンスからGitHubセクションのHTMLを組み立てる。
 // REST/GraphQL/Searchは固定順(状態による並び替えをしない)で常に横並び表示する。
 function githubSectionHtml(data) {
+  const autoRefreshNoticeHtml = githubAutoRefreshNoticeHtml(data);
+
   if (!data || !data.fetched) {
     const usingLastKnown = data && !data.fetched && data.last_known;
+    const secondaryHtml = githubSecondaryRateLimitBannerHtml(data);
     if (!usingLastKnown) {
-      return `<div class="compact-card compact-empty">GitHub Rate Limit: 未取得</div>`;
+      return `
+        ${secondaryHtml}
+        <div class="compact-card compact-empty">GitHub Rate Limit: 未取得</div>
+        ${autoRefreshNoticeHtml}`;
     }
     const resources = data.last_known.resources;
     const overall = data.last_known.overall;
     return `
+      ${secondaryHtml}
       <div class="compact-stale-notice">直近の取得は失敗しました。以下は${fmtDateOrUnknown(data.last_known.collected_at)}時点の情報です。</div>
+      ${githubLimitedBannerHtml(overall, resources, true)}
       ${githubOverallHtml(overall)}
+      ${autoRefreshNoticeHtml}
       <div class="compact-github-grid-inner">
         ${githubResourceCardHtml(resources.core)}
         ${githubResourceCardHtml(resources.graphql)}
@@ -229,7 +312,9 @@ function githubSectionHtml(data) {
   }
 
   return `
+    ${githubLimitedBannerHtml(data.overall, data.resources, false)}
     ${githubOverallHtml(data.overall)}
+    ${autoRefreshNoticeHtml}
     <div class="compact-github-grid-inner">
       ${githubResourceCardHtml(data.resources.core)}
       ${githubResourceCardHtml(data.resources.graphql)}
@@ -484,6 +569,10 @@ if (typeof module !== "undefined") {
     githubResourceCardHtml,
     githubOverallHtml,
     githubOverallStatusClass,
+    githubLimitedCause,
+    githubLimitedBannerHtml,
+    githubSecondaryRateLimitBannerHtml,
+    githubAutoRefreshNoticeHtml,
     githubSectionHtml,
     claudeUsageWindowHtml,
     claudeCodeSectionHtml,

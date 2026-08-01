@@ -295,7 +295,74 @@ body {
   padding: 5px 8px;
 }
 
+.compact-github-limited-banner {
+  align-items: center;
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 8px;
+}
+
+.compact-github-limited-badge {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.compact-banner-limited {
+  background: #3a1414;
+  border: 1px solid #6b2020;
+  color: #ff6b6b;
+}
+
+.compact-banner-limited .compact-github-limited-badge {
+  background: #6b2020;
+  color: #ffdada;
+}
+
+.compact-banner-overdue {
+  background: #3a2410;
+  border: 1px solid #6b4820;
+  color: #ffa94d;
+}
+
+.compact-banner-overdue .compact-github-limited-badge {
+  background: #6b4820;
+  color: #ffe3c2;
+}
+
+.compact-banner-stale {
+  background: #22282c;
+  border: 1px solid #3a4348;
+  color: #9fb0b8;
+}
+
+.compact-banner-stale .compact-github-limited-badge {
+  background: #3a4348;
+  color: #d6e0e4;
+}
+
+.compact-banner-secondary {
+  background: #2a1c3a;
+  border: 1px solid #4b2f6b;
+  color: #c9a3ff;
+}
+
+.compact-banner-secondary .compact-github-limited-badge {
+  background: #4b2f6b;
+  color: #ecdcff;
+}
+
 .compact-stale-notice {
+  color: #768692;
+  font-size: 10px;
+}
+
+.compact-auto-refresh-notice {
   color: #768692;
   font-size: 10px;
 }

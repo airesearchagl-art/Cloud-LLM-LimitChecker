@@ -319,6 +319,65 @@ def test_invalid_response_error_type(gh_client, monkeypatch):
     assert response.json()["error"]["error_type"] == "invalid_response"
 
 
+# 21b. secondary_rate_limit
+def test_secondary_rate_limit_error_type_via_api(gh_client, monkeypatch):
+    monkeypatch.setattr(
+        "app.main.fetch_github_rate_limit",
+        fake_failure(
+            "secondary_rate_limit",
+            "GitHub secondary rate limit reached. This is separate from the primary core/graphql rate limit.",
+        ),
+    )
+    set_now(monkeypatch, NOW)
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    body = response.json()
+    assert body["error"]["error_type"] == "secondary_rate_limit"
+    assert body["fetched"] is False
+    # secondary rate limit must never be reported as the primary Limited overall status.
+    assert body["overall"] is None or body["overall"]["status"] != "Limited"
+
+
+# 21c. core・graphql同時枯渇: tie-breakでcoreが原因として報告される
+def test_multi_resource_exhaustion_overall_names_core_via_api(gh_client, monkeypatch):
+    payload = {
+        "resources": {
+            "core": {"limit": 5000, "used": 5000, "remaining": 0, "reset": int(NOW.timestamp()) + 3600},
+            "graphql": {"limit": 5000, "used": 5000, "remaining": 0, "reset": int(NOW.timestamp()) + 3600},
+        }
+    }
+    monkeypatch.setattr("app.main.fetch_github_rate_limit", fake_success(payload))
+    set_now(monkeypatch, NOW)
+
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    body = response.json()
+
+    assert body["resources"]["core"]["status"] == "Exhausted"
+    assert body["resources"]["graphql"]["status"] == "Exhausted"
+    assert body["overall"]["status"] == "Limited"
+    assert body["overall"]["reason"] == "REST API core exhausted"
+
+
+# 21d. reset時刻経過後もremaining=0のままだとReset overdue（現在のExhaustedとは異なる原因として報告される）
+def test_reset_overdue_overall_reason_via_api(gh_client, monkeypatch):
+    now = NOW
+    overdue_reset = int(now.timestamp()) - 3600
+    payload = {
+        "resources": {
+            "core": {"limit": 5000, "used": 5000, "remaining": 0, "reset": overdue_reset},
+            "graphql": {"limit": 5000, "used": 100, "remaining": 4900, "reset": int(now.timestamp()) + 3600},
+        }
+    }
+    monkeypatch.setattr("app.main.fetch_github_rate_limit", fake_success(payload))
+    set_now(monkeypatch, now)
+
+    response = gh_client.post("/api/github-rate-limit/refresh")
+    body = response.json()
+
+    assert body["resources"]["core"]["status"] == "Reset overdue"
+    assert body["overall"]["status"] == "Limited"
+    assert body["overall"]["reason"] == "REST API core reset overdue"
+
+
 # 22. search ErrorでもOverallへ影響しない
 def test_search_error_does_not_affect_overall_via_api(gh_client, monkeypatch):
     payload = {

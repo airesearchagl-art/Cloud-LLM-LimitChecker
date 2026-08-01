@@ -109,6 +109,56 @@ def test_generic_api_failure(monkeypatch):
     assert result.error_type == "api_error"
 
 
+# 8b. secondary rate limitに相当するstderr
+def test_secondary_rate_limit_stderr(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *a, **k: make_completed(
+            returncode=1, stderr="You have exceeded a secondary rate limit. Please wait a few minutes."
+        ),
+    )
+    result = cli.fetch_github_rate_limit(now=NOW)
+    assert result.error_type == "secondary_rate_limit"
+
+
+# 8c. secondary rate limitの文言があれば、HTTPステータスの言及より優先して分類する
+def test_secondary_rate_limit_takes_priority_over_generic_api_error(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *a, **k: make_completed(
+            returncode=1,
+            stderr="gh: You have triggered an abuse detection mechanism (HTTP 403)",
+        ),
+    )
+    result = cli.fetch_github_rate_limit(now=NOW)
+    assert result.error_type == "secondary_rate_limit"
+
+
+# 8d. bare HTTP 403/429だけではsecondary rate limitと断定しない
+def test_bare_403_without_known_wording_is_not_secondary_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda *a, **k: make_completed(returncode=1, stderr="gh: Forbidden (HTTP 403)"),
+    )
+    result = cli.fetch_github_rate_limit(now=NOW)
+    assert result.error_type == "api_error"
+
+
+# 8e. secondary rate limitのstderr全文がuser_messageへ漏れない
+def test_secondary_rate_limit_stderr_not_leaked_into_user_message(monkeypatch):
+    raw_stderr = "secondary rate limit hit for user internal-employee-12345 on org acme-corp"
+    monkeypatch.setattr(
+        cli.subprocess, "run", lambda *a, **k: make_completed(returncode=1, stderr=raw_stderr)
+    )
+    result = cli.fetch_github_rate_limit(now=NOW)
+    assert result.error_type == "secondary_rate_limit"
+    assert raw_stderr not in (result.user_message or "")
+    assert "internal-employee-12345" not in (result.user_message or "")
+
+
 # 9. stdoutが空
 def test_empty_stdout_is_invalid_json(monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: make_completed(stdout=""))
