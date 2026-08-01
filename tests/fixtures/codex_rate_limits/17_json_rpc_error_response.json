@@ -1,0 +1,7 @@
+{
+  "id": 2,
+  "error": {
+    "code": -32601,
+    "message": "method not found: account/rateLimits/read"
+  }
+}

@@ -20,6 +20,13 @@ from app import crud, models, schemas
 from app.calculations import alert_items, limit_to_dashboard
 from app.claude_code_usage_cache import load_snapshot as load_claude_code_usage_snapshot
 from app import codex_usage_cache
+from app import codex_rate_limits_cache
+from app.codex_rate_limits_adapter import fetch_codex_rate_limits
+from app.codex_rate_limits_state import (
+    CodexRateLimitsController,
+    CodexRateLimitsRefreshCooldownError,
+    CodexRateLimitsRefreshInProgressError,
+)
 from app.collectors.importer import CollectorImportError, import_normalized_records
 from app.collectors.claude_collector import (
     ClaudeCollectorConfigError,
@@ -131,6 +138,11 @@ app.add_middleware(OptionalBasicAuthMiddleware)
 # not shared across worker processes. Page load never triggers a fetch here —
 # only the POST refresh endpoint below calls the CLI adapter.
 app.state.github_rate_limit_controller = GitHubRateLimitController()
+
+# Process-local only (see CodexRateLimitsController docstring): the actual
+# rate limit data lives in the file-based cache, not here. Page load never
+# starts Codex App Server — only the POST refresh endpoint below does.
+app.state.codex_rate_limits_controller = CodexRateLimitsController()
 
 
 def _current_utc_time() -> datetime:
@@ -529,6 +541,67 @@ def put_codex_usage(payload: schemas.CodexUsageInput) -> dict:
         raise HTTPException(status_code=400, detail="invalid Codex usage input") from exc
     codex_usage_cache.write_cache_atomic(validated, codex_usage_cache.resolve_cache_path())
     return codex_usage_cache.load_snapshot(now=now)
+
+
+def _codex_rate_limits_response(now: datetime) -> dict:
+    snapshot = codex_rate_limits_cache.load_snapshot(now=now)
+    controller: CodexRateLimitsController = app.state.codex_rate_limits_controller
+    status = controller.status(now=now)
+    error = status["last_error"] or {}
+    # Never merges the manual snapshot's own values into this response — only
+    # whether it exists, so the display layer can decide when to fall back to
+    # it (see docs/codex-rate-limits-auto.md).
+    manual_fallback = codex_usage_cache.load_snapshot(now=now)
+    return {
+        "fetched": snapshot["available"],
+        "available": snapshot["available"],
+        "stale": snapshot["stale"],
+        "status": snapshot["status"],
+        "observed_at": snapshot["observed_at"],
+        "source": snapshot["source"],
+        "five_hour": snapshot["five_hour"],
+        "weekly": snapshot["weekly"],
+        "error_type": error.get("error_type"),
+        "user_message": error.get("user_message"),
+        "refresh_in_progress": status["refresh_in_progress"],
+        "cooldown_remaining_seconds": status["cooldown_remaining_seconds"],
+        "fallback_available": manual_fallback["available"],
+        "fallback_source": codex_usage_cache.SOURCE_NAME if manual_fallback["available"] else None,
+    }
+
+
+@app.get("/api/codex-rate-limits", response_model=schemas.CodexRateLimitsSnapshot)
+def get_codex_rate_limits() -> dict:
+    """Read-only load of the auto-fetch cache + refresh state. Never starts Codex App Server."""
+    return _codex_rate_limits_response(_current_utc_time())
+
+
+@app.post("/api/codex-rate-limits/refresh", response_model=schemas.CodexRateLimitsSnapshot)
+def refresh_codex_rate_limits() -> dict:
+    """The only endpoint that launches Codex App Server, for a single account/rateLimits/read call."""
+    controller: CodexRateLimitsController = app.state.codex_rate_limits_controller
+    now = _current_utc_time()
+    try:
+        controller.refresh(now=now, fetch=fetch_codex_rate_limits, cache_path=codex_rate_limits_cache.resolve_cache_path())
+    except CodexRateLimitsRefreshCooldownError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "cooldown_active",
+                "user_message": "更新の間隔が短すぎます。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
+    except CodexRateLimitsRefreshInProgressError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "already_refreshing",
+                "user_message": "更新を実行中です。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": 0,
+            },
+        ) from exc
+    return _codex_rate_limits_response(_current_utc_time())
 
 
 @app.get("/compact", include_in_schema=False)

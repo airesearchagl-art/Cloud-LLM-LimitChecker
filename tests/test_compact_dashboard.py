@@ -348,6 +348,7 @@ def test_compact_page_load_endpoints_never_call_gh(monkeypatch: pytest.MonkeyPat
         assert client.get("/api/dashboard").status_code == 200
         assert client.get("/api/github-rate-limit").status_code == 200
         assert client.get("/api/claude-code-usage").status_code == 200
+        assert client.get("/api/codex-rate-limits").status_code == 200
 
 
 # GitHub未取得表示
@@ -428,7 +429,7 @@ CODEX_USAGE_AVAILABLE = {
 
 # 27. /compactで5時間枠表示 / 28. /compactで週次枠表示 / 29.「手動確認値」表示
 def test_codex_usage_section_shows_five_hour_and_weekly_with_manual_badge() -> None:
-    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(CODEX_USAGE_AVAILABLE)})")
+    html = run_compact_js(f"compact.codexUsageSectionHtml(null, {json.dumps(CODEX_USAGE_AVAILABLE)})")
     assert "5時間枠" in html
     assert "週次枠" in html
     assert "60%" in html  # 5h remaining
@@ -440,21 +441,25 @@ def test_codex_usage_section_shows_five_hour_and_weekly_with_manual_badge() -> N
 
 # 30. 未入力表示
 def test_codex_usage_section_not_observed_shows_manual_input_guidance() -> None:
-    html = run_compact_js('compact.codexUsageSectionHtml({available: false, status: "not_observed"})')
-    assert "Codex /statusで確認後に手動入力" in html
+    html = run_compact_js(
+        'compact.codexUsageSectionHtml({available: false, status: "not_observed"}, {available: false, status: "not_observed"})'
+    )
+    assert "自動取得または手動入力してください" in html
 
 
 # 31. stale表示
 def test_codex_usage_section_shows_stale_notice() -> None:
     data = {**CODEX_USAGE_AVAILABLE, "stale": True, "status": "stale"}
-    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(data)})")
-    assert "最終手動確認値" in html
+    html = run_compact_js(f"compact.codexUsageSectionHtml(null, {json.dumps(data)})")
+    assert "手動確認値" in html
     assert "古い可能性があります" in html
 
 
 # 32. invalid cache表示
 def test_codex_usage_section_invalid_cache_shows_unavailable() -> None:
-    html = run_compact_js('compact.codexUsageSectionHtml({available: false, status: "invalid_cache"})')
+    html = run_compact_js(
+        'compact.codexUsageSectionHtml({available: false, status: "invalid_cache"}, {available: false, status: "invalid_cache"})'
+    )
     assert "取得不可" in html
 
 
@@ -471,7 +476,7 @@ def test_codex_usage_window_reset_overdue_hides_percentage_and_shows_no_negative
 # 週次だけ未入力の場合はその枠だけ「未入力」
 def test_codex_usage_section_shows_partial_window_as_unentered() -> None:
     data = {**CODEX_USAGE_AVAILABLE, "weekly": None}
-    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(data)})")
+    html = run_compact_js(f"compact.codexUsageSectionHtml(null, {json.dumps(data)})")
     assert "5時間枠" in html
     assert "40%" in html
     assert "未入力" in html
@@ -488,9 +493,87 @@ def test_compact_page_load_never_calls_subprocess_for_codex_usage(monkeypatch: p
     with TestClient(app) as client:
         assert client.get("/compact").status_code == 200
         assert client.get("/api/codex-usage").status_code == 200
+        assert client.get("/api/codex-rate-limits").status_code == 200
 
 
 def test_compact_js_never_invokes_codex_or_a_child_process() -> None:
     js = COMPACT_JS.read_text(encoding="utf-8")
     for marker in ("codex exec", "child_process", "spawn(", "execSync", "codex.exe"):
         assert marker not in js
+
+
+def test_compact_js_never_calls_codex_rate_limits_refresh() -> None:
+    js = COMPACT_JS.read_text(encoding="utf-8")
+    assert "/api/codex-rate-limits/refresh" not in js
+
+
+# 39/40 (Codex App Server自動取得): ページロードでは/api/codex-rate-limitsのGETのみ、POSTは行わない
+def test_compact_page_load_never_starts_codex_app_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    def explode(*args, **kwargs):
+        raise AssertionError("Codex App Server must never be started by page-load GET endpoints")
+
+    monkeypatch.setattr("app.main.fetch_codex_rate_limits", explode)
+
+    with TestClient(app) as client:
+        assert client.get("/compact").status_code == 200
+        assert client.get("/api/codex-rate-limits").status_code == 200
+
+
+AUTO_RATE_LIMITS_FRESH = {
+    "fetched": True,
+    "available": True,
+    "stale": False,
+    "status": "ok",
+    "observed_at": "2026-01-01T12:00:00+00:00",
+    "source": "codex_app_server",
+    "five_hour": {"used_percentage": 40.0, "remaining_percentage": 60.0, "resets_at": "2999-01-01T00:00:00+00:00", "window_duration_minutes": 300},
+    "weekly": {"used_percentage": 20.0, "remaining_percentage": 80.0, "resets_at": "2999-01-08T00:00:00+00:00", "window_duration_minutes": 10080},
+    "error_type": None,
+    "user_message": None,
+    "refresh_in_progress": False,
+    "cooldown_remaining_seconds": 0,
+    "fallback_available": True,
+    "fallback_source": "codex_manual",
+}
+
+
+# 38: compactのsourceバッジ — 自動取得cacheが新鮮なら「自動取得」を優先表示する
+def test_resolve_codex_display_prefers_fresh_auto_cache_over_manual() -> None:
+    result = run_compact_js(
+        f"compact.resolveCodexDisplay({json.dumps(AUTO_RATE_LIMITS_FRESH)}, {json.dumps(CODEX_USAGE_AVAILABLE)})"
+    )
+    assert result["source"] == "codex_app_server"
+    assert result["badgeLabel"] == "自動取得"
+
+
+# 34: 自動cache優先 — staleでも手動snapshotより自動cacheを優先する
+def test_resolve_codex_display_prefers_stale_auto_cache_over_manual() -> None:
+    stale_auto = {**AUTO_RATE_LIMITS_FRESH, "stale": True, "status": "stale"}
+    result = run_compact_js(f"compact.resolveCodexDisplay({json.dumps(stale_auto)}, {json.dumps(CODEX_USAGE_AVAILABLE)})")
+    assert result["source"] == "codex_app_server"
+    assert result["badgeLabel"] == "最終自動取得値"
+
+
+# 36: 手動fallback — 自動cacheが未取得の場合のみ手動snapshotを表示する
+def test_resolve_codex_display_falls_back_to_manual_when_auto_unavailable() -> None:
+    unavailable_auto = {"available": False, "status": "not_observed"}
+    result = run_compact_js(
+        f"compact.resolveCodexDisplay({json.dumps(unavailable_auto)}, {json.dumps(CODEX_USAGE_AVAILABLE)})"
+    )
+    assert result["source"] == "codex_manual"
+    assert result["badgeLabel"] == "手動確認値"
+
+
+# 37: 両方なし
+def test_resolve_codex_display_both_unavailable() -> None:
+    unavailable = {"available": False, "status": "not_observed"}
+    result = run_compact_js(f"compact.resolveCodexDisplay({json.dumps(unavailable)}, {json.dumps(unavailable)})")
+    assert result["source"] is None
+    assert result["status"] == "not_observed"
+
+
+def test_codex_usage_section_shows_auto_source_badge() -> None:
+    html = run_compact_js(f"compact.codexUsageSectionHtml({json.dumps(AUTO_RATE_LIMITS_FRESH)}, null)")
+    assert html.count("自動取得") >= 2
+    assert "40%" in html
+    assert "20%" in html

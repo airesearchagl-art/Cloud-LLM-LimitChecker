@@ -1,0 +1,5 @@
+[
+  "{\"id\": 1, \"result\": {\"userAgent\": \"fixture\", \"codexHome\": \"fixture\"}}",
+  "this line is not JSON at all >>> garbage <<<",
+  "{\"id\": 2, \"result\": {\"rateLimits\": {\"limitId\": \"fixture-limit\", \"primary\": {\"usedPercent\": 42.0, \"windowDurationMins\": 300, \"resetsAt\": 4102448400}, \"secondary\": null}}}"
+]

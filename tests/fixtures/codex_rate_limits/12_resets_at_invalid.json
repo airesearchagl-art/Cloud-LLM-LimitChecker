@@ -1,0 +1,9 @@
+{
+  "rateLimits": {
+    "limitId": "fixture-limit",
+    "limitName": null,
+    "primary": {"usedPercent": 42.0, "windowDurationMins": 300, "resetsAt": "not-a-timestamp"},
+    "secondary": null,
+    "rateLimitReachedType": null
+  }
+}

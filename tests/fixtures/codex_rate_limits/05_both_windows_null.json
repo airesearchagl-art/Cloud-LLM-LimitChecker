@@ -1,0 +1,9 @@
+{
+  "rateLimits": {
+    "limitId": "fixture-limit",
+    "limitName": null,
+    "primary": null,
+    "secondary": null,
+    "rateLimitReachedType": null
+  }
+}

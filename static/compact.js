@@ -4,6 +4,7 @@ const state = {
   dashboard: [],
   github: null,
   claudeCodeUsage: null,
+  codexRateLimits: null,
   codexUsage: null,
 };
 
@@ -282,10 +283,11 @@ function claudeCodeSectionHtml(data) {
   `;
 }
 
-// DOMに触れない純粋関数: Codex Usage手動入力キャッシュ1枠分(5時間 or 週次)のカードHTMLを組み立てる。
-// remaining/usedは管理画面での保存時に既に0-100%へ検証済みの値のみを渡される想定。
+// DOMに触れない純粋関数: Codex Usageキャッシュ(自動取得 or 手動入力)1枠分(5時間 or 週次)のカードHTMLを組み立てる。
+// remaining/usedは呼び出し元(自動adapterまたは管理画面保存時)で既に0-100%へ検証済みの値のみを渡される想定。
 // resets_atを過ぎている場合は、古いpercentageを現在値のように強調表示せず「reset時刻超過」だけを示す。
-function codexUsageWindowHtml(label, window) {
+// badgeLabelは表示中のsourceを示すバッジ文言(「自動取得」「最終自動取得値」「手動確認値」)。
+function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値") {
   if (!window) {
     return `
       <article class="compact-card">
@@ -312,32 +314,74 @@ function codexUsageWindowHtml(label, window) {
     <article class="compact-card">
       <div class="compact-card-head">
         <span class="compact-service-name">${escapeHtml(label)}</span>
-        <span class="compact-source-badge">手動確認値</span>
+        <span class="compact-source-badge">${escapeHtml(badgeLabel)}</span>
       </div>
       ${bodyBlock}
       <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
     </article>`;
 }
 
-// DOMに触れない純粋関数: GET /api/codex-usage のレスポンスからセクションHTMLを組み立てる。
-// 自動取得ではなく手動入力のため、staleは「最終手動確認値が古い可能性がある」という意味で表示する。
-function codexUsageSectionHtml(data) {
-  if (!data || !data.available) {
-    const message = data && data.status === "invalid_cache" ? "取得不可" : "Codex /statusで確認後に手動入力";
+// DOMに触れない純粋関数: 自動取得cache(GET /api/codex-rate-limits)と手動snapshot(GET /api/codex-usage)から
+// 表示すべきsource・データ・バッジ文言を決定する。優先順位(自動cacheと手動cacheを1ファイルへ統合はしない):
+//   1. 自動cacheが利用可能(staleでも) -> 自動データを表示(バッジ「自動取得」/ stale時「最終自動取得値」)
+//   2. 自動cacheが利用不可・手動snapshotが利用可能 -> 手動データへfallback(バッジ「手動確認値」)
+//   3. どちらも利用不可 -> 未取得 or 取得不可
+function resolveCodexDisplay(auto, manual) {
+  if (auto && auto.available) {
+    return {
+      source: "codex_app_server",
+      badgeLabel: auto.stale ? "最終自動取得値" : "自動取得",
+      stale: auto.stale,
+      observed_at: auto.observed_at,
+      five_hour: auto.five_hour,
+      weekly: auto.weekly,
+      status: null,
+    };
+  }
+  if (manual && manual.available) {
+    return {
+      source: "codex_manual",
+      badgeLabel: "手動確認値",
+      stale: manual.stale,
+      observed_at: manual.observed_at,
+      five_hour: manual.five_hour,
+      weekly: manual.weekly,
+      status: null,
+    };
+  }
+  const invalid = (auto && auto.status === "invalid_cache") || (manual && manual.status === "invalid_cache");
+  return {
+    source: null,
+    badgeLabel: null,
+    stale: false,
+    observed_at: null,
+    five_hour: null,
+    weekly: null,
+    status: invalid ? "invalid_cache" : "not_observed",
+  };
+}
+
+// DOMに触れない純粋関数: GET /api/codex-rate-limits(自動取得) と GET /api/codex-usage(手動入力) の
+// レスポンスからCodex Usageセクション全体のHTMLを組み立てる。
+function codexUsageSectionHtml(auto, manual) {
+  const resolved = resolveCodexDisplay(auto, manual);
+  if (!resolved.source) {
+    const message = resolved.status === "invalid_cache" ? "取得不可" : "自動取得または手動入力してください";
     return `<div class="compact-card compact-empty">Codex Usage: ${message}</div>`;
   }
 
-  const staleNoticeHtml = data.stale
-    ? `<div class="compact-stale-notice">最終手動確認値・古い可能性があります</div>`
+  const staleNoticeHtml = resolved.stale
+    ? `<div class="compact-stale-notice">${escapeHtml(resolved.badgeLabel)}・古い可能性があります</div>`
     : "";
+  const lastLabel = resolved.source === "codex_manual" ? "最終手動確認" : "最終自動取得";
 
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${codexUsageWindowHtml("5時間枠", data.five_hour)}
-      ${codexUsageWindowHtml("週次枠", data.weekly)}
+      ${codexUsageWindowHtml("5時間枠", resolved.five_hour, resolved.badgeLabel)}
+      ${codexUsageWindowHtml("週次枠", resolved.weekly, resolved.badgeLabel)}
     </div>
-    <div class="compact-stale-notice">最終手動確認: ${fmtDateOrUnknown(data.observed_at)}</div>
+    <div class="compact-stale-notice">${lastLabel}: ${fmtDateOrUnknown(resolved.observed_at)}</div>
   `;
 }
 
@@ -361,29 +405,31 @@ function renderClaudeCodeUsage(data) {
   document.querySelector("#claudeCodeUsageCards").innerHTML = claudeCodeSectionHtml(data);
 }
 
-function renderCodexUsage(data) {
-  document.querySelector("#codexUsageCards").innerHTML = codexUsageSectionHtml(data);
+function renderCodexUsage(auto, manual) {
+  document.querySelector("#codexUsageCards").innerHTML = codexUsageSectionHtml(auto, manual);
 }
 
-// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・/api/codex-usage はいずれも
-// 保存済みの値を返すだけで、gh api rate_limitやClaude Code/Codexの起動などの外部コマンド/APIを
-// ここから直接実行することはない。
+// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・/api/codex-rate-limits・
+// /api/codex-usage はいずれも保存済みの値を返すだけで、gh api rate_limitやClaude Code/Codex App Server
+// の起動などの外部コマンド/APIをここから直接実行することはない(更新系リクエストはここから一切送信しない)。
 async function loadCompact() {
   try {
-    const [dashboard, github, claudeCodeUsage, codexUsage] = await Promise.all([
+    const [dashboard, github, claudeCodeUsage, codexRateLimits, codexUsage] = await Promise.all([
       fetchJson("/api/dashboard"),
       fetchJson("/api/github-rate-limit"),
       fetchJson("/api/claude-code-usage"),
+      fetchJson("/api/codex-rate-limits"),
       fetchJson("/api/codex-usage"),
     ]);
     state.dashboard = dashboard;
     state.github = github;
     state.claudeCodeUsage = claudeCodeUsage;
+    state.codexRateLimits = codexRateLimits;
     state.codexUsage = codexUsage;
     renderLimitCards(dashboard);
     renderGithubSection(github);
     renderClaudeCodeUsage(claudeCodeUsage);
-    renderCodexUsage(codexUsage);
+    renderCodexUsage(codexRateLimits, codexUsage);
   } catch (error) {
     document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
   } finally {
@@ -423,6 +469,7 @@ if (typeof module !== "undefined") {
     claudeUsageWindowHtml,
     claudeCodeSectionHtml,
     codexUsageWindowHtml,
+    resolveCodexDisplay,
     codexUsageSectionHtml,
   };
 }

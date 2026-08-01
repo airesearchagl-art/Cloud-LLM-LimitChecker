@@ -5,6 +5,7 @@ const state = {
   collectorRuns: [],
   editingLimitId: null,
   codexUsage: null,
+  codexRateLimits: null,
 };
 
 const api = async (path, options = {}) => {
@@ -252,16 +253,18 @@ function applyFiltersAndSort(rows) {
 }
 
 async function loadAll() {
-  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit, codexUsage] = await Promise.all([
-    api("/api/services"),
-    api("/api/limits"),
-    api("/api/dashboard"),
-    api("/api/alerts"),
-    api("/api/usage-records"),
-    api("/api/collector-runs"),
-    api("/api/github-rate-limit"),
-    api("/api/codex-usage"),
-  ]);
+  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit, codexUsage, codexRateLimits] =
+    await Promise.all([
+      api("/api/services"),
+      api("/api/limits"),
+      api("/api/dashboard"),
+      api("/api/alerts"),
+      api("/api/usage-records"),
+      api("/api/collector-runs"),
+      api("/api/github-rate-limit"),
+      api("/api/codex-usage"),
+      api("/api/codex-rate-limits"),
+    ]);
   state.dashboard = dashboard;
   state.limits = limits;
   state.history = history;
@@ -273,6 +276,7 @@ async function loadAll() {
   renderCollectorRuns();
   renderGithubRateLimit(githubRateLimit);
   renderCodexUsage(codexUsage);
+  renderCodexRateLimits(codexRateLimits);
 }
 
 async function refreshCollectorRuns() {
@@ -308,6 +312,34 @@ function startGithubCooldownCountdown(retryAfterSeconds) {
   githubCooldownIntervalId = setInterval(tick, 1000);
 }
 
+let codexRateLimitsCooldownIntervalId = null;
+
+function stopCodexRateLimitsCooldownCountdown() {
+  if (codexRateLimitsCooldownIntervalId) {
+    clearInterval(codexRateLimitsCooldownIntervalId);
+    codexRateLimitsCooldownIntervalId = null;
+  }
+}
+
+function startCodexRateLimitsCooldownCountdown(retryAfterSeconds) {
+  stopCodexRateLimitsCooldownCountdown();
+  const button = document.querySelector("#codexRateLimitsRefresh");
+  let remaining = Math.max(0, Math.ceil(retryAfterSeconds));
+  const tick = () => {
+    if (remaining <= 0) {
+      stopCodexRateLimitsCooldownCountdown();
+      button.disabled = false;
+      button.textContent = "自動取得";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = `自動取得（あと${remaining}秒）`;
+    remaining -= 1;
+  };
+  tick();
+  codexRateLimitsCooldownIntervalId = setInterval(tick, 1000);
+}
+
 function renderSelects(services, limits) {
   document.querySelector("#serviceSelect").innerHTML = services
     .map((s) => `<option value="${s.id}">${escapeHtml(s.name)} / ${escapeHtml(s.plan_name)}</option>`)
@@ -339,6 +371,35 @@ function renderCodexUsage(data) {
     document.querySelector("#codexWeeklyRemaining").value = weekly.remaining_percentage;
     document.querySelector("#codexWeeklyResetsAt").value = toDatetimeLocalValue(weekly.resets_at);
   }
+}
+
+// Codex App Server(account/rateLimits/read)の自動取得状態のみを表示する。
+// 実際のカード表示・fallback判定は監視用ダッシュボード側(resolveCodexDisplay)が担い、
+// ここでは「今どの状態か」を確認できれば十分な最小表示にとどめる。
+function renderCodexRateLimits(data) {
+  state.codexRateLimits = data;
+  const resultEl = document.querySelector("#codexRateLimitsResult");
+  if (!resultEl) return;
+  if (!data) {
+    resultEl.innerHTML = "";
+    return;
+  }
+
+  const statusLabel = data.available ? (data.stale ? "最終自動取得値（古い可能性あり）" : "自動取得成功") : "未取得";
+  const currentSource = data.available ? "codex_app_server" : data.fallback_available ? data.fallback_source : "未取得";
+  const lastAttemptText = data.observed_at ? fmtDate(data.observed_at) : "未実行";
+  const errorHtml = data.error_type
+    ? `<div class="codex-usage-error">${escapeHtml(data.user_message || "")}</div>`
+    : "";
+
+  resultEl.innerHTML = `
+    <div class="codex-rate-limits-status">
+      <div>自動取得状態: ${escapeHtml(statusLabel)}</div>
+      <div>最終自動取得時刻: ${escapeHtml(lastAttemptText)}</div>
+      <div>現在表示中のsource: ${escapeHtml(currentSource)}</div>
+    </div>
+    ${errorHtml}
+  `;
 }
 
 function renderDashboard() {
@@ -783,6 +844,39 @@ function initApp() {
       renderGithubRateLimit({ error: { user_message: error.message } });
       button.disabled = false;
       button.textContent = "更新";
+    }
+  });
+
+  document.querySelector("#codexRateLimitsRefresh").addEventListener("click", async () => {
+    stopCodexRateLimitsCooldownCountdown();
+    const button = document.querySelector("#codexRateLimitsRefresh");
+    button.disabled = true;
+    button.textContent = "取得中...";
+    try {
+      const response = await fetch("/api/codex-rate-limits/refresh", { method: "POST" });
+      if (response.status === 429) {
+        const body = await response.json().catch(() => ({}));
+        const detail = body.detail || {};
+        renderCodexRateLimits({ ...state.codexRateLimits, error_type: "cooldown_active", user_message: detail.user_message });
+        if (detail.retry_after_seconds > 0) {
+          startCodexRateLimitsCooldownCountdown(detail.retry_after_seconds);
+        } else {
+          button.disabled = false;
+          button.textContent = "自動取得";
+        }
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const data = await response.json();
+      renderCodexRateLimits(data);
+      button.disabled = false;
+      button.textContent = "自動取得";
+    } catch (error) {
+      renderCodexRateLimits({ ...state.codexRateLimits, error_type: "unknown_error", user_message: error.message });
+      button.disabled = false;
+      button.textContent = "自動取得";
     }
   });
 

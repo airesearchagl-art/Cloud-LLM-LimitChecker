@@ -1,0 +1,23 @@
+{
+  "rateLimits": {
+    "limitId": "fixture-limit",
+    "limitName": null,
+    "primary": {"usedPercent": 42.0, "windowDurationMins": 300, "resetsAt": 4102448400},
+    "secondary": null,
+    "rateLimitReachedType": null
+  },
+  "rateLimitResetCredits": {
+    "availableCount": 1,
+    "credits": [
+      {
+        "id": "fixture-credit-id",
+        "resetType": "fixture-type",
+        "status": "available",
+        "grantedAt": 4102448400,
+        "expiresAt": null,
+        "title": null,
+        "description": null
+      }
+    ]
+  }
+}

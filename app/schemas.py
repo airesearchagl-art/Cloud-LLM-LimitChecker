@@ -216,6 +216,30 @@ class CodexUsageInput(BaseModel):
         return self
 
 
+class CodexRateLimitsWindow(BaseModel):
+    used_percentage: float
+    remaining_percentage: float
+    resets_at: str
+    window_duration_minutes: int
+
+
+class CodexRateLimitsSnapshot(BaseModel):
+    fetched: bool
+    available: bool
+    stale: bool
+    status: str
+    observed_at: str | None
+    source: str | None
+    five_hour: CodexRateLimitsWindow | None
+    weekly: CodexRateLimitsWindow | None
+    error_type: str | None
+    user_message: str | None
+    refresh_in_progress: bool
+    cooldown_remaining_seconds: int
+    fallback_available: bool
+    fallback_source: str | None
+
+
 class CollectorRunRead(BaseModel):
     id: int
     vendor: str
