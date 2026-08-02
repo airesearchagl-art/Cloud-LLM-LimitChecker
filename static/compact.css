@@ -291,6 +291,65 @@ body {
   background: #a78bfa;
 }
 
+/* GitHub/Claude/Codexカード共通: 左に使用状況、右にRESET(絶対時刻+残り時間)を横並びで
+   配置する。カードが十分広ければ2カラム、狭ければflex-wrapで縦積みに自然に戻る
+   (メディアクエリではなく、カード自身のレンダリング幅に応じて折り返す)。 */
+.compact-card-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.compact-card-left {
+  flex: 1 1 108px;
+  min-width: 0;
+}
+
+.compact-reset-block {
+  border-left: 1px solid #2a3540;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 84px;
+  padding-left: 8px;
+  text-align: right;
+}
+
+.compact-reset-label {
+  color: #768692;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.compact-reset-absolute {
+  color: #c9d3da;
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 1px;
+  overflow-wrap: anywhere;
+}
+
+.compact-reset-remaining-label {
+  color: #768692;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+  text-transform: uppercase;
+}
+
+.compact-reset-remaining-value {
+  color: #e6edf3;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
 .compact-meta-row {
   border-top: 1px solid #2a3540;
   color: #768692;

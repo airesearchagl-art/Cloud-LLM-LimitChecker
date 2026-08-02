@@ -166,10 +166,13 @@ def resource(status, **overrides):
     return base
 
 
-# fresh(stale=false)なGitHub resource cardは「あと」付きの相対時間を表示する
+# fresh(stale=false)なGitHub resource cardは「リセットまで」ラベル付きの相対時間を表示する
+# (右RESETブロックでは「あと」プレフィックスを外し、値そのものを表示する)
 def test_compact_github_resource_card_fresh_shows_countdown():
     html = run_compact_js(f"compact.githubResourceCardHtml({json.dumps(resource('Normal'))}, false)")
-    assert "あと1時間 1分" in html
+    assert "リセットまで" in html
+    assert "1時間 1分" in html
+    assert "あと1時間" not in html
 
 
 # stale(last_known由来)なGitHub resource cardは絶対時刻のみで、「あと」を出さない
@@ -200,8 +203,8 @@ def window(resets_at="2999-01-01T00:00:00+00:00"):
 def test_compact_claude_window_stale_suppresses_countdown():
     fresh_html = run_compact_js(f'compact.claudeUsageWindowHtml("Claude 5時間枠", {json.dumps(window())}, false)')
     stale_html = run_compact_js(f'compact.claudeUsageWindowHtml("Claude 5時間枠", {json.dumps(window())}, true)')
-    assert "あと" in fresh_html
-    assert "あと" not in stale_html
+    assert "リセットまで" in fresh_html
+    assert "リセットまで" not in stale_html
     assert "2999" in stale_html
 
 
@@ -212,8 +215,8 @@ def test_compact_codex_window_stale_suppresses_countdown():
     stale_html = run_compact_js(
         f'compact.codexUsageWindowHtml("Codex 5時間枠", {json.dumps(window())}, "自動取得", true)'
     )
-    assert "あと" in fresh_html
-    assert "あと" not in stale_html
+    assert "リセットまで" in fresh_html
+    assert "リセットまで" not in stale_html
     assert "2999" in stale_html
 
 
