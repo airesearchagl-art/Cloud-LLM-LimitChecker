@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app import crud, models, schemas
 from app.calculations import alert_items, limit_to_dashboard
 from app.claude_code_usage_cache import load_snapshot as load_claude_code_usage_snapshot
+from app import claude_desktop_cloud_usage_cache
 from app import codex_usage_cache
 from app import codex_rate_limits_cache
 from app.codex_rate_limits_adapter import fetch_codex_rate_limits
@@ -173,16 +174,19 @@ def _current_utc_time() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Codex usage input is user-typed (never a stored secret), but a mistyped
-# value pasted into the wrong field could still be something sensitive-looking.
-# FastAPI/Pydantic's default 422 body echoes the raw offending value back in
-# each error's `input` (and sometimes `ctx`) — harmless for every other
-# endpoint in this app, but specifically avoided here per this endpoint's own
-# "never echo raw input" contract. Every other route keeps the default
-# behavior unchanged.
+# Codex/Claude Desktop Cloud usage input is user-typed (never a stored secret),
+# but a mistyped value pasted into the wrong field could still be something
+# sensitive-looking. FastAPI/Pydantic's default 422 body echoes the raw
+# offending value back in each error's `input` (and sometimes `ctx`) —
+# harmless for every other endpoint in this app, but specifically avoided
+# here per these endpoints' own "never echo raw input" contract. Every other
+# route keeps the default behavior unchanged.
+_SANITIZED_VALIDATION_ERROR_PATHS = {"/api/codex-usage", "/api/claude-code-usage/manual"}
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_exception_handler(request: Request, exc: RequestValidationError):
-    if request.url.path != "/api/codex-usage":
+    if request.url.path not in _SANITIZED_VALIDATION_ERROR_PATHS:
         return await request_validation_exception_handler(request, exc)
     sanitized = [{"type": error.get("type"), "loc": error.get("loc"), "msg": error.get("msg")} for error in exc.errors()]
     return JSONResponse(status_code=422, content={"detail": sanitized})
@@ -526,8 +530,62 @@ def refresh_github_rate_limit() -> dict:
 
 @app.get("/api/claude-code-usage", response_model=schemas.ClaudeCodeUsageSnapshot)
 def get_claude_code_usage() -> dict:
-    """Read-only load of the local statusLine bridge cache. Never runs Claude Code, never calls out."""
+    """Read-only load of the local statusLine bridge cache. Never runs Claude Code, never calls out.
+
+    Unchanged since introduction: always reflects only the CLI statusLine
+    auto-cache, never the Claude Desktop Cloud manual snapshot below. This
+    endpoint's shape and behavior are kept fully backward compatible; the
+    manual snapshot is exposed on its own sibling routes instead, and the
+    display layer (static/compact.js `resolveClaudeCodeUsageDisplay`)
+    chooses which one to show without either GET needing to know about the
+    other.
+    """
     return load_claude_code_usage_snapshot(now=_current_utc_time())
+
+
+def _claude_desktop_cloud_window_input_to_record(
+    window: schemas.ClaudeDesktopCloudUsageWindowInput | None,
+) -> dict | None:
+    if window is None:
+        return None
+    # used_percentage is always derived server-side; the input schema has no
+    # such field, so the user can never submit an inconsistent pair.
+    return {
+        "used_percentage": 100.0 - window.remaining_percentage,
+        "remaining_percentage": window.remaining_percentage,
+        "resets_at": window.resets_at.isoformat(),
+    }
+
+
+@app.get("/api/claude-code-usage/manual", response_model=schemas.ClaudeCodeUsageSnapshot)
+def get_claude_desktop_cloud_usage() -> dict:
+    """Read-only load of the manually saved Claude Desktop Cloud usage snapshot.
+
+    Never runs Claude Code, never calls out, never scrapes the Desktop app.
+    This is a value the user read off Claude Desktop's own usage panel and
+    typed in — see docs/claude-code-usage-bridge.md for why a Cloud-environment
+    Code session cannot update the statusLine cache directly.
+    """
+    return claude_desktop_cloud_usage_cache.load_snapshot(now=_current_utc_time())
+
+
+@app.put("/api/claude-code-usage/manual", response_model=schemas.ClaudeCodeUsageSnapshot)
+def put_claude_desktop_cloud_usage(payload: schemas.ClaudeDesktopCloudUsageInput) -> dict:
+    """Save a manually-entered Claude Desktop Cloud usage snapshot. Never runs Claude, never calls out."""
+    now = _current_utc_time()
+    record = {
+        "schema_version": claude_desktop_cloud_usage_cache.SCHEMA_VERSION,
+        "source": claude_desktop_cloud_usage_cache.SOURCE_NAME,
+        "observed_at": now.isoformat(),
+        "five_hour": _claude_desktop_cloud_window_input_to_record(payload.five_hour),
+        "seven_day": _claude_desktop_cloud_window_input_to_record(payload.seven_day),
+    }
+    try:
+        validated = claude_desktop_cloud_usage_cache.validate_cache_record(record, now=now)
+    except claude_desktop_cloud_usage_cache.CacheValidationError as exc:
+        raise HTTPException(status_code=400, detail="invalid Claude Desktop Cloud usage input") from exc
+    claude_desktop_cloud_usage_cache.write_cache_atomic(validated, claude_desktop_cloud_usage_cache.resolve_cache_path())
+    return claude_desktop_cloud_usage_cache.load_snapshot(now=now)
 
 
 def _codex_window_input_to_record(window: schemas.CodexUsageWindowInput | None) -> dict | None:

@@ -6,6 +6,7 @@ const state = {
   editingLimitId: null,
   codexUsage: null,
   codexRateLimits: null,
+  claudeDesktopCloudUsage: null,
 };
 
 const api = async (path, options = {}) => {
@@ -30,6 +31,22 @@ function toDatetimeLocalValue(value) {
   if (Number.isNaN(d.getTime())) return "";
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// datetime-local入力値をISO文字列へ変換する。new Date(value)がInvalid Dateになるケース
+// (空文字・壊れた値など)をtoISOString()の例外にせず、呼び出し元でvalidation errorとして
+// 扱えるようnullを返す。DOMに触れない純粋関数。
+function parseDatetimeLocalToIsoOrNull(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+// ブラウザ標準confirmを直接呼ばず関数越しにすることで、テスト/プレビューから差し替え可能にする。
+function confirmClaudeDesktopCloudUsageSave() {
+  if (typeof window === "undefined" || typeof window.confirm !== "function") return true;
+  return window.confirm("Claude Desktop Cloud 使用率を保存します。よろしいですか？");
 }
 
 function escapeHtml(value) {
@@ -389,18 +406,29 @@ function applyFiltersAndSort(rows) {
 }
 
 async function loadAll() {
-  const [services, limits, dashboard, alerts, history, collectorRuns, githubRateLimit, codexUsage, codexRateLimits] =
-    await Promise.all([
-      api("/api/services"),
-      api("/api/limits"),
-      api("/api/dashboard"),
-      api("/api/alerts"),
-      api("/api/usage-records"),
-      api("/api/collector-runs"),
-      api("/api/github-rate-limit"),
-      api("/api/codex-usage"),
-      api("/api/codex-rate-limits"),
-    ]);
+  const [
+    services,
+    limits,
+    dashboard,
+    alerts,
+    history,
+    collectorRuns,
+    githubRateLimit,
+    claudeDesktopCloudUsage,
+    codexUsage,
+    codexRateLimits,
+  ] = await Promise.all([
+    api("/api/services"),
+    api("/api/limits"),
+    api("/api/dashboard"),
+    api("/api/alerts"),
+    api("/api/usage-records"),
+    api("/api/collector-runs"),
+    api("/api/github-rate-limit"),
+    api("/api/claude-code-usage/manual"),
+    api("/api/codex-usage"),
+    api("/api/codex-rate-limits"),
+  ]);
   state.dashboard = dashboard;
   state.limits = limits;
   state.history = history;
@@ -411,6 +439,7 @@ async function loadAll() {
   renderHistory();
   renderCollectorRuns();
   renderGithubRateLimit(githubRateLimit);
+  renderClaudeDesktopCloudUsage(claudeDesktopCloudUsage);
   renderCodexUsage(codexUsage);
   renderCodexRateLimits(codexRateLimits);
 }
@@ -512,6 +541,34 @@ function renderSelects(services, limits) {
   document.querySelector("#limitSelect").innerHTML = limits
     .map((l) => `<option value="${l.id}">#${l.id} ${escapeHtml(l.model_name)} / ${escapeHtml(l.limit_type)}</option>`)
     .join("");
+}
+
+// Claude Desktop Cloud usage is manual-only: this only reflects the last value
+// the user typed in, never anything scraped from Claude Desktop or read from
+// Claude's own session/transcript files. See docs/claude-code-usage-bridge.md
+// for why a Cloud-environment Code session can't update the CLI statusLine
+// cache directly, and why this manual fallback exists as a separate cache
+// from `claude-code-usage.json`.
+function renderClaudeDesktopCloudUsage(data) {
+  state.claudeDesktopCloudUsage = data;
+  const lastConfirmedEl = document.querySelector("#claudeDesktopCloudUsageLastConfirmed");
+  if (!data || !data.available) {
+    lastConfirmedEl.textContent = "最終手動確認: 未入力";
+    return;
+  }
+  const staleSuffix = data.stale ? "（古い可能性があります）" : "";
+  lastConfirmedEl.textContent = `最終手動確認: ${fmtDate(data.observed_at)}${staleSuffix}`;
+
+  const fiveHour = data.five_hour;
+  const sevenDay = data.seven_day;
+  if (fiveHour) {
+    document.querySelector("#claudeDesktopCloudFiveHourRemaining").value = fiveHour.remaining_percentage;
+    document.querySelector("#claudeDesktopCloudFiveHourResetsAt").value = toDatetimeLocalValue(fiveHour.resets_at);
+  }
+  if (sevenDay) {
+    document.querySelector("#claudeDesktopCloudSevenDayRemaining").value = sevenDay.remaining_percentage;
+    document.querySelector("#claudeDesktopCloudSevenDayResetsAt").value = toDatetimeLocalValue(sevenDay.resets_at);
+  }
 }
 
 // Codex usage is manual-only: this only reflects the last value the user typed
@@ -930,6 +987,50 @@ function initApp() {
     await loadAll();
   });
 
+  document.querySelector("#claudeDesktopCloudUsageForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const resultEl = document.querySelector("#claudeDesktopCloudUsageResult");
+    resultEl.innerHTML = "";
+
+    const data = Object.fromEntries(new FormData(event.target));
+    const fiveHourRemaining = data.five_hour_remaining_percentage;
+    const sevenDayRemaining = data.seven_day_remaining_percentage;
+
+    // 表示側はauto/manualをsnapshot単位でしか切り替えず、windowをまたいだ合成をしない。
+    // 片方だけの保存を許すと、より新しいmanual snapshotが、完全なauto snapshotの片方の
+    // 枠を(表示上)覆い隠してしまうため、両方必須にする。
+    if (fiveHourRemaining === "" || sevenDayRemaining === "" || !data.five_hour_resets_at || !data.seven_day_resets_at) {
+      resultEl.innerHTML = `<div class="codex-usage-error">5時間枠・7日枠の両方(残り%とreset日時)を入力してください。</div>`;
+      return;
+    }
+
+    const fiveHourResetsAtIso = parseDatetimeLocalToIsoOrNull(data.five_hour_resets_at);
+    const sevenDayResetsAtIso = parseDatetimeLocalToIsoOrNull(data.seven_day_resets_at);
+    if (!fiveHourResetsAtIso || !sevenDayResetsAtIso) {
+      resultEl.innerHTML = `<div class="codex-usage-error">reset日時の形式が正しくありません。</div>`;
+      return;
+    }
+
+    const payload = {
+      five_hour: { remaining_percentage: Number(fiveHourRemaining), resets_at: fiveHourResetsAtIso },
+      seven_day: { remaining_percentage: Number(sevenDayRemaining), resets_at: sevenDayResetsAtIso },
+    };
+
+    if (!confirmClaudeDesktopCloudUsageSave()) return;
+
+    const submitButton = document.querySelector("#claudeDesktopCloudUsageSubmit");
+    submitButton.disabled = true;
+    try {
+      const snapshot = await api("/api/claude-code-usage/manual", { method: "PUT", body: JSON.stringify(payload) });
+      renderClaudeDesktopCloudUsage(snapshot);
+      resultEl.innerHTML = `<div class="codex-usage-success">保存しました。</div>`;
+    } catch (error) {
+      resultEl.innerHTML = `<div class="codex-usage-error">${escapeHtml(error.message)}</div>`;
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+
   document.querySelector("#codexUsageForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const resultEl = document.querySelector("#codexUsageResult");
@@ -1138,5 +1239,7 @@ if (typeof module !== "undefined") {
     githubLimitedBannerHtml,
     githubSecondaryRateLimitBannerHtml,
     codexRateLimitsErrorDisplay,
+    confirmClaudeDesktopCloudUsageSave,
+    parseDatetimeLocalToIsoOrNull,
   };
 }

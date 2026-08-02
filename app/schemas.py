@@ -153,6 +153,61 @@ class ClaudeCodeUsageSnapshot(BaseModel):
     error_message: str | None
 
 
+class ClaudeDesktopCloudUsageWindowInput(BaseModel):
+    # extra="forbid" rejects any field beyond the two documented here (in
+    # particular `used_percentage`, which the server always derives itself
+    # and must never accept from the client) instead of silently ignoring it.
+    model_config = ConfigDict(extra="forbid")
+
+    remaining_percentage: float
+    resets_at: datetime
+
+    @field_validator("remaining_percentage", mode="before")
+    @classmethod
+    def reject_non_numeric_remaining_percentage(cls, value: object) -> object:
+        # Deliberately stricter than Pydantic's default lax-float coercion,
+        # which would otherwise accept numeric strings like "42" or "42.0" —
+        # this field only ever accepts an actual int/float, matching the
+        # manual-entry-only contract documented for this endpoint.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("remaining_percentage must be an int or float (not bool, str, null, list, or dict)")
+        return value
+
+    @model_validator(mode="after")
+    def validate_window_input(self) -> "ClaudeDesktopCloudUsageWindowInput":
+        if not (0 <= self.remaining_percentage <= 100):
+            raise ValueError("remaining_percentage must be between 0 and 100")
+        if self.resets_at.tzinfo is None or self.resets_at.tzinfo.utcoffset(self.resets_at) is None:
+            raise ValueError("resets_at must be timezone-aware")
+        return self
+
+
+class ClaudeDesktopCloudUsageInput(BaseModel):
+    # extra="forbid" rejects any unexpected top-level field (e.g. `source`,
+    # `observed_at`, or an arbitrary field like `token`) instead of silently
+    # ignoring it — both windows are always server-normalized, never passed
+    # through from client input.
+    model_config = ConfigDict(extra="forbid")
+
+    five_hour: ClaudeDesktopCloudUsageWindowInput | None = None
+    seven_day: ClaudeDesktopCloudUsageWindowInput | None = None
+
+    @model_validator(mode="after")
+    def validate_both_windows_required(self) -> "ClaudeDesktopCloudUsageInput":
+        # Unlike Codex's manual fallback (where auto always wins over manual whenever
+        # both are available, so a partial manual snapshot never hides auto data),
+        # Claude's display picks whichever snapshot has the newer observed_at as a
+        # whole unit (see resolveClaudeCodeUsageDisplay in static/compact.js) and
+        # never mixes windows across auto/manual. A partial manual snapshot that's
+        # newer than a complete auto snapshot would therefore silently hide a
+        # window the user could previously see. Requiring both windows here keeps
+        # every manual snapshot self-contained, matching Claude Desktop's own usage
+        # panel which always shows both the 5-hour and 7-day windows together.
+        if self.five_hour is None or self.seven_day is None:
+            raise ValueError("both five_hour and seven_day are required")
+        return self
+
+
 class CodexUsageWindow(BaseModel):
     used_percentage: float
     remaining_percentage: float
