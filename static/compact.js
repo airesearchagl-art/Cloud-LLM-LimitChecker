@@ -199,6 +199,24 @@ function limitCardHtml(row) {
   `;
 }
 
+// DOMに触れない純粋関数: GitHub/Claude/Codexカード共通の右側RESETブロックを組み立てる。
+// reset絶対時刻と「あと...」の残り時間を、カード下端の小さな補助行ではなく、
+// カード右側の余白を使った独立ブロックとして主要情報の扱いで表示する。
+// relativeTextが空(stale抑制等で「あと...」を出さない場合)は絶対時刻のみを表示する。
+function resetBlockHtml(absoluteText, relativeText) {
+  const remainingHtml = relativeText
+    ? `
+      <div class="compact-reset-remaining-label">残り</div>
+      <div class="compact-reset-remaining-value">${escapeHtml(relativeText)}</div>`
+    : "";
+  return `
+    <div class="compact-reset-block">
+      <div class="compact-reset-label">RESET</div>
+      <div class="compact-reset-absolute">${escapeHtml(absoluteText)}</div>
+      ${remainingHtml}
+    </div>`;
+}
+
 // DOMに触れない純粋関数: GitHubの1リソース分のカードHTMLを組み立てる。UTC詳細は表示しない。
 // stale=trueはlast_known(直近取得失敗時の最終成功値)由来を意味し、resetまでの「あと...」
 // カウントダウンは抑制する(絶対時刻はそのまま表示する)。
@@ -220,7 +238,7 @@ function githubResourceCardHtml(resource, stale = false) {
 
   const hasPercent = resource.remaining_percent !== null && resource.remaining_percent !== undefined;
   const width = Math.min(Math.max(resource.usage_percent ?? 0, 0), 100);
-  const bodyBlock = hasPercent
+  const leftBlock = hasPercent
     ? `
       <div class="compact-percent-row">
         <span class="compact-percent-label">残り</span>
@@ -232,7 +250,7 @@ function githubResourceCardHtml(resource, stale = false) {
     : `<div class="compact-no-limit">上限未登録</div>`;
 
   const relativeText = suppressCountdownIfStale(githubSecondsUntilResetText(resource.seconds_until_reset), stale);
-  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(resource.reset_at_local), relativeText);
+  const absoluteText = fmtDateOrUnknown(resource.reset_at_local);
 
   return `
     <article class="compact-card compact-github-card compact-provider-github">
@@ -240,8 +258,10 @@ function githubResourceCardHtml(resource, stale = false) {
         ${titleHtml}
         <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
       </div>
-      ${bodyBlock}
-      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
+      <div class="compact-card-body">
+        <div class="compact-card-left">${leftBlock}</div>
+        ${resetBlockHtml(absoluteText, relativeText)}
+      </div>
     </article>
   `;
 }
@@ -391,17 +411,21 @@ function claudeUsageWindowHtml(label, window, stale = false) {
   }
   const width = Math.min(Math.max(window.used_percentage, 0), 100);
   const relativeText = suppressCountdownIfStale(resetRelativeText(window.resets_at), stale);
-  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(window.resets_at), relativeText);
+  const absoluteText = fmtDateOrUnknown(window.resets_at);
   return `
     <article class="compact-card compact-provider-claude">
       <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
-      <div class="compact-percent-row">
-        <span class="compact-percent-label">残り</span>
-        <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(window.remaining_percentage)}%</span>
+      <div class="compact-card-body">
+        <div class="compact-card-left">
+          <div class="compact-percent-row">
+            <span class="compact-percent-label">残り</span>
+            <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(window.remaining_percentage)}%</span>
+          </div>
+          <div class="compact-usage-line">使用済み ${fmtNumber(window.used_percentage)}%</div>
+          <div class="compact-meter"><div class="compact-meter-fill compact-claude-usage" style="width:${width}%"></div></div>
+        </div>
+        ${resetBlockHtml(absoluteText, relativeText)}
       </div>
-      <div class="compact-usage-line">使用済み ${fmtNumber(window.used_percentage)}%</div>
-      <div class="compact-meter"><div class="compact-meter-fill compact-claude-usage" style="width:${width}%"></div></div>
-      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
     </article>`;
 }
 
@@ -445,8 +469,8 @@ function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", sta
   const rawRelative = resetRelativeText(window.resets_at);
   const resetExceeded = rawRelative === "reset時刻超過";
   const relativeText = suppressCountdownIfStale(rawRelative, stale);
-  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(window.resets_at), relativeText);
-  const bodyBlock = resetExceeded
+  const absoluteText = fmtDateOrUnknown(window.resets_at);
+  const leftBlock = resetExceeded
     ? `<div class="compact-no-limit">reset時刻超過</div>`
     : (() => {
         const width = Math.min(Math.max(window.used_percentage, 0), 100);
@@ -465,8 +489,10 @@ function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", sta
         <span class="compact-service-name">${escapeHtml(label)}</span>
         <span class="compact-source-badge">${escapeHtml(badgeLabel)}</span>
       </div>
-      ${bodyBlock}
-      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
+      <div class="compact-card-body">
+        <div class="compact-card-left">${leftBlock}</div>
+        ${resetBlockHtml(absoluteText, relativeText)}
+      </div>
     </article>`;
 }
 
@@ -640,6 +666,7 @@ if (typeof module !== "undefined") {
     statusPriorityRank,
     sortDashboardRows,
     limitCardHtml,
+    resetBlockHtml,
     githubResourceCardHtml,
     githubOverallHtml,
     githubOverallStatusClass,
