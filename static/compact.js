@@ -231,13 +231,17 @@ function resetBlockHtml(absoluteText, relativeText) {
 // stale=trueはlast_known(直近取得失敗時の最終成功値)由来を意味し、resetまでの「あと...」
 // カウントダウンは抑制する(絶対時刻はそのまま表示する)。
 // providerの識別は色(box-shadow)だけに依存させず、"GitHub "を明示ラベルとして付与する。
+// カードのstable ID(github.core/github.graphql/github.search)はresource.resourceの値と
+// 1対1で対応する(githubResourceLabelが対応する3値のみを想定するのと同じ前提)。
+// DOM位置からの推測ではなく、HTML生成時にdata-card-idとして直接埋め込む。
 function githubResourceCardHtml(resource, stale = false) {
   if (!resource) return "";
+  const cardId = `github.${resource.resource}`;
   const statusClass = githubStatusClass(resource.status);
   const titleHtml = `<span class="compact-service-name">${escapeHtml(`GitHub ${githubResourceLabel(resource.resource)}`)}</span>`;
   if (resource.status === "Error") {
     return `
-      <article class="compact-card compact-github-card compact-provider-github">
+      <article class="compact-card compact-github-card compact-provider-github" data-card-id="${escapeHtml(cardId)}">
         <div class="compact-card-head">
           ${titleHtml}
           <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
@@ -263,7 +267,7 @@ function githubResourceCardHtml(resource, stale = false) {
   const absoluteText = fmtDateOrUnknown(resource.reset_at_local);
 
   return `
-    <article class="compact-card compact-github-card compact-provider-github">
+    <article class="compact-card compact-github-card compact-provider-github" data-card-id="${escapeHtml(cardId)}">
       <div class="compact-card-head">
         ${titleHtml}
         <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
@@ -411,10 +415,14 @@ function githubSectionHtml(data) {
 // DOMに触れない純粋関数: Claude Code statusLineブリッジのキャッシュ1枠分(5時間 or 7日)のカードHTMLを組み立てる。
 // remaining/usedはブリッジ側で既に0-100%へ検証済みの値のみを渡される想定。
 // stale=trueは最終観測値が古い可能性があることを意味し、resetまでの「あと...」カウントダウンは抑制する。
-function claudeUsageWindowHtml(label, window, stale = false) {
+// cardId(例: "claude.five_hour")はレイアウトカスタマイズ用のstable ID。表示文言(label)や
+// DOM位置から推測せず、呼び出し元(claudeCodeSectionHtml)が明示的に渡す。省略時(null)は
+// data-card-id属性を付与しない(既存呼び出し・既存テストとの後方互換のため末尾の省略可能引数とする)。
+function claudeUsageWindowHtml(label, window, stale = false, cardId = null) {
+  const cardIdAttr = cardId ? ` data-card-id="${escapeHtml(cardId)}"` : "";
   if (!window) {
     return `
-      <article class="compact-card compact-provider-claude">
+      <article class="compact-card compact-provider-claude"${cardIdAttr}>
         <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
         <div class="compact-no-limit">未観測</div>
       </article>`;
@@ -423,7 +431,7 @@ function claudeUsageWindowHtml(label, window, stale = false) {
   const relativeText = suppressCountdownIfStale(resetRelativeText(window.resets_at), stale);
   const absoluteText = fmtDateOrUnknown(window.resets_at);
   return `
-    <article class="compact-card compact-provider-claude">
+    <article class="compact-card compact-provider-claude"${cardIdAttr}>
       <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
       <div class="compact-card-body">
         <div class="compact-card-left">
@@ -455,8 +463,8 @@ function claudeCodeSectionHtml(data) {
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${claudeUsageWindowHtml("Claude 5時間枠", data.five_hour, data.stale)}
-      ${claudeUsageWindowHtml("Claude 7日枠", data.seven_day, data.stale)}
+      ${claudeUsageWindowHtml("Claude 5時間枠", data.five_hour, data.stale, "claude.five_hour")}
+      ${claudeUsageWindowHtml("Claude 7日枠", data.seven_day, data.stale, "claude.seven_day")}
     </div>
     <div class="compact-stale-notice">最終観測: ${fmtDateOrUnknown(data.observed_at)}</div>
   `;
@@ -468,10 +476,14 @@ function claudeCodeSectionHtml(data) {
 // badgeLabelは表示中のsourceを示すバッジ文言(「自動取得」「最終自動取得値」「手動確認値」)。
 // stale=trueは最終観測値が古い可能性があることを意味し、resetまでの「あと...」カウントダウンは抑制する
 // (reset時刻超過自体は事実表記のため、staleでも維持しresetExceeded判定にも使う)。
-function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", stale = false) {
+// cardId(例: "codex.five_hour")はレイアウトカスタマイズ用のstable ID。表示文言(label)や
+// DOM位置から推測せず、呼び出し元(codexUsageSectionHtml)が明示的に渡す。省略時(null)は
+// data-card-id属性を付与しない(既存呼び出し・既存テストとの後方互換のため末尾の省略可能引数とする)。
+function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", stale = false, cardId = null) {
+  const cardIdAttr = cardId ? ` data-card-id="${escapeHtml(cardId)}"` : "";
   if (!window) {
     return `
-      <article class="compact-card compact-provider-codex">
+      <article class="compact-card compact-provider-codex"${cardIdAttr}>
         <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
         <div class="compact-no-limit">未入力</div>
       </article>`;
@@ -496,7 +508,7 @@ function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", sta
         `;
       })();
   return `
-    <article class="compact-card compact-provider-codex">
+    <article class="compact-card compact-provider-codex"${cardIdAttr}>
       <div class="compact-card-head">
         <span class="compact-service-name">${escapeHtml(label)}</span>
         <span class="compact-source-badge">${escapeHtml(badgeLabel)}</span>
@@ -589,12 +601,536 @@ function codexUsageSectionHtml(auto, manual) {
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${codexUsageWindowHtml("Codex 5時間枠", resolved.five_hour, resolved.badgeLabel, resolved.stale)}
-      ${codexUsageWindowHtml("Codex 週次枠", resolved.weekly, resolved.badgeLabel, resolved.stale)}
+      ${codexUsageWindowHtml("Codex 5時間枠", resolved.five_hour, resolved.badgeLabel, resolved.stale, "codex.five_hour")}
+      ${codexUsageWindowHtml("Codex 週次枠", resolved.weekly, resolved.badgeLabel, resolved.stale, "codex.weekly")}
     </div>
     <div class="compact-stale-notice">${lastLabel}: ${fmtDateOrUnknown(resolved.observed_at)}</div>
     ${codexPeriodicRefreshNoticeHtml(auto)}
   `;
+}
+
+// ============================================================================
+// レイアウトカスタマイズ(presentation層のみ): セクション/カードの並べ替え・表示切替。
+// 取得ロジック・domain判定・stale判定・app schedule等には一切触れない。
+// 保存内容にはID/順序/表示状態のみを含み、usage値・reset時刻・account情報は含めない。
+// ============================================================================
+
+const LAYOUT_STORAGE_KEY = "cloudLlmCompactLayout";
+const LAYOUT_VERSION = 1;
+
+// 各Providerセクションの識別子・見出し・カード格納先grid(card-levelの並べ替え対象が
+// あるセクションのみgridSelectorを持つ。dashboardは既存DB行由来でstable IDを持たないため
+// section単位の並べ替えのみ対象とする)。
+const SECTION_META = [
+  { id: "section.dashboard", label: "ダッシュボード", containerId: "dashboardSection", gridSelector: null },
+  {
+    id: "section.github",
+    label: "GitHub API Rate Limit",
+    containerId: "githubSection",
+    gridSelector: "#githubCards .compact-github-grid-inner",
+  },
+  {
+    id: "section.claude",
+    label: "Claude Code Usage",
+    containerId: "claudeSection",
+    gridSelector: "#claudeCodeUsageCards .compact-github-grid-inner",
+  },
+  {
+    id: "section.codex",
+    label: "Codex Usage",
+    containerId: "codexSection",
+    gridSelector: "#codexUsageCards .compact-github-grid-inner",
+  },
+];
+
+const DEFAULT_SECTION_ORDER = SECTION_META.map((section) => section.id);
+
+// 各セクション内のカードのstable ID。表示文言や配列indexではなく、この固定IDで
+// 並べ替え・表示状態を保存する。レンダリング関数(githubSectionHtml等)は常にこの順で
+// カードを出力するため、DOM上は位置によってIDへ対応付ける(レンダリング関数自体は変更しない)。
+const CARD_META_BY_SECTION = {
+  "section.github": [
+    { id: "github.core", label: "GitHub REST API" },
+    { id: "github.graphql", label: "GitHub GraphQL API" },
+    { id: "github.search", label: "GitHub Search API" },
+  ],
+  "section.claude": [
+    { id: "claude.five_hour", label: "Claude 5時間枠" },
+    { id: "claude.seven_day", label: "Claude 7日枠" },
+  ],
+  "section.codex": [
+    { id: "codex.five_hour", label: "Codex 5時間枠" },
+    { id: "codex.weekly", label: "Codex 週次枠" },
+  ],
+};
+
+const ALL_KNOWN_CARD_IDS = Object.values(CARD_META_BY_SECTION)
+  .flat()
+  .map((card) => card.id);
+
+function cardMetaById(cardId) {
+  for (const cards of Object.values(CARD_META_BY_SECTION)) {
+    const found = cards.find((card) => card.id === cardId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function sectionMetaById(sectionId) {
+  return SECTION_META.find((section) => section.id === sectionId) || null;
+}
+
+// DOMに触れない純粋関数: 初期(既定)のlayout stateを返す。
+function defaultLayoutState() {
+  const cardOrderBySection = {};
+  for (const sectionId of Object.keys(CARD_META_BY_SECTION)) {
+    cardOrderBySection[sectionId] = CARD_META_BY_SECTION[sectionId].map((card) => card.id);
+  }
+  return {
+    version: LAYOUT_VERSION,
+    sectionOrder: [...DEFAULT_SECTION_ORDER],
+    cardOrderBySection,
+    hiddenCardIds: [],
+  };
+}
+
+// DOMに触れない純粋関数: 候補のID配列を「既知IDの集合」に対して検証・正規化する。
+// 不明ID(defaultOrderに存在しないID)は無視し、重複IDは除去し、欠落ID(defaultOrderには
+// あるが候補に無いID)はdefaultOrderでの順序を保ったまま末尾へ補完する。
+// sectionOrder・cardOrderBySectionの各セクション別リストの両方で共通に使う。
+function sanitizeIdOrder(candidate, defaultOrder) {
+  const knownIds = new Set(defaultOrder);
+  const seen = new Set();
+  const result = [];
+  if (Array.isArray(candidate)) {
+    for (const id of candidate) {
+      if (typeof id === "string" && knownIds.has(id) && !seen.has(id)) {
+        seen.add(id);
+        result.push(id);
+      }
+    }
+  }
+  for (const id of defaultOrder) {
+    if (!seen.has(id)) {
+      seen.add(id);
+      result.push(id);
+    }
+  }
+  return result;
+}
+
+// DOMに触れない純粋関数: JSON.parse済みの値を安全なlayout stateへ正規化する。
+// 型不正・version不一致は丸ごと初期値へフォールバックする(部分的な信用はしない)。
+// sectionOrder/cardOrderBySection内の各セクションはsanitizeIdOrderで個別に検証する
+// (Providerをまたいだ不明なカードIDが紛れ込んでいても、そのセクションのdefaultOrderに
+// 存在しない限り無視されるため、セクションをまたぐカード混在はデータレベルでも起こらない)。
+// hiddenCardIdsは既知カードIDのみを保持し、文字列以外・重複・不明IDを除去する。
+function sanitizeLayoutState(raw) {
+  const fallback = defaultLayoutState();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fallback;
+  if (raw.version !== LAYOUT_VERSION) return fallback;
+
+  const sectionOrder = sanitizeIdOrder(raw.sectionOrder, DEFAULT_SECTION_ORDER);
+
+  const cardOrderBySection = {};
+  const rawCardOrderBySection =
+    raw.cardOrderBySection && typeof raw.cardOrderBySection === "object" && !Array.isArray(raw.cardOrderBySection)
+      ? raw.cardOrderBySection
+      : {};
+  for (const sectionId of Object.keys(CARD_META_BY_SECTION)) {
+    const defaults = CARD_META_BY_SECTION[sectionId].map((card) => card.id);
+    cardOrderBySection[sectionId] = sanitizeIdOrder(rawCardOrderBySection[sectionId], defaults);
+  }
+
+  const hiddenCardIds = Array.isArray(raw.hiddenCardIds)
+    ? [...new Set(raw.hiddenCardIds.filter((id) => typeof id === "string" && ALL_KNOWN_CARD_IDS.includes(id)))]
+    : [];
+
+  return { version: LAYOUT_VERSION, sectionOrder, cardOrderBySection, hiddenCardIds };
+}
+
+// DOMに触れない純粋関数: localStorageから読み込んだ生文字列(nullや空文字を含む)を
+// 安全なlayout stateへ変換する。JSON.parse自体が失敗する場合も初期値へフォールバックする。
+function loadLayoutStateFromRaw(rawString) {
+  if (!rawString) return defaultLayoutState();
+  let parsed;
+  try {
+    parsed = JSON.parse(rawString);
+  } catch (error) {
+    return defaultLayoutState();
+  }
+  return sanitizeLayoutState(parsed);
+}
+
+// DOMに触れない純粋関数: 保存用のJSON文字列を組み立てる。usage値・reset時刻・
+// account情報等は一切含めず、ID・順序・表示状態のみを保存する。
+function serializeLayoutState(state) {
+  return JSON.stringify({
+    version: LAYOUT_VERSION,
+    sectionOrder: state.sectionOrder,
+    cardOrderBySection: state.cardOrderBySection,
+    hiddenCardIds: state.hiddenCardIds,
+  });
+}
+
+// DOMに触れない純粋関数: 配列内の指定IDを新しいindex位置へ移動する。
+// 上へ/下へボタン(index±1を指定)とドラッグ&ドロップ(ドロップ先のindexを指定)の
+// 両方がこの関数を経由するため、ボタン操作とドラッグ操作は同じ並べ替え結果になる。
+// 存在しないIDやindex範囲外の指定は安全に無視/クランプする。
+function moveIdToIndex(order, id, newIndex) {
+  const currentIndex = order.indexOf(id);
+  if (currentIndex === -1) return order;
+  const next = [...order];
+  next.splice(currentIndex, 1);
+  const clampedIndex = Math.max(0, Math.min(newIndex, next.length));
+  next.splice(clampedIndex, 0, id);
+  return next;
+}
+
+// 現在のlayout stateと編集モードフラグ(共にDOM外で保持する純粋なデータ)。
+const layout = {
+  state: defaultLayoutState(),
+  editMode: false,
+};
+
+function loadLayoutStateFromStorage() {
+  let raw = null;
+  try {
+    raw = window.localStorage.getItem(LAYOUT_STORAGE_KEY);
+  } catch (error) {
+    // プライベートブラウジング等でlocalStorageが使えない環境でも表示は継続する。
+    raw = null;
+  }
+  return loadLayoutStateFromRaw(raw);
+}
+
+function saveLayoutStateToStorage(currentState) {
+  try {
+    window.localStorage.setItem(LAYOUT_STORAGE_KEY, serializeLayoutState(currentState));
+  } catch (error) {
+    // 容量超過やprivateモード等で保存に失敗しても、表示自体は継続する(この回だけ復元されない)。
+  }
+}
+
+function announceLayout(message) {
+  const el = document.getElementById("layoutAnnounce");
+  if (el) el.textContent = message;
+}
+
+function cardLabelById(cardId) {
+  const meta = cardMetaById(cardId);
+  return meta ? meta.label : cardId;
+}
+
+function sectionLabelById(sectionId) {
+  const meta = sectionMetaById(sectionId);
+  return meta ? meta.label : sectionId;
+}
+
+// ブラウザ標準confirmを直接呼ばず関数越しにすることで、テスト/プレビューから差し替え可能にする。
+function confirmLayoutReset() {
+  if (typeof window === "undefined" || typeof window.confirm !== "function") return true;
+  return window.confirm("レイアウトを初期配置に戻しますか？ 表示・非表示や並び順の変更が失われます。");
+}
+
+function persistAndApplyLayout(message) {
+  saveLayoutStateToStorage(layout.state);
+  applyFullLayout();
+  if (message) announceLayout(message);
+}
+
+function moveCard(sectionId, cardId, direction) {
+  const order = layout.state.cardOrderBySection[sectionId] || [];
+  const currentIndex = order.indexOf(cardId);
+  if (currentIndex === -1) return;
+  layout.state.cardOrderBySection[sectionId] = moveIdToIndex(order, cardId, currentIndex + direction);
+  persistAndApplyLayout(`${cardLabelById(cardId)}を移動しました`);
+}
+
+function moveCardToIndex(sectionId, cardId, targetIndex) {
+  const order = layout.state.cardOrderBySection[sectionId] || [];
+  layout.state.cardOrderBySection[sectionId] = moveIdToIndex(order, cardId, targetIndex);
+  persistAndApplyLayout(`${cardLabelById(cardId)}を移動しました`);
+}
+
+function moveSection(sectionId, direction) {
+  const currentIndex = layout.state.sectionOrder.indexOf(sectionId);
+  if (currentIndex === -1) return;
+  layout.state.sectionOrder = moveIdToIndex(layout.state.sectionOrder, sectionId, currentIndex + direction);
+  persistAndApplyLayout(`${sectionLabelById(sectionId)}セクションを移動しました`);
+}
+
+function moveSectionToIndex(sectionId, targetIndex) {
+  layout.state.sectionOrder = moveIdToIndex(layout.state.sectionOrder, sectionId, targetIndex);
+  persistAndApplyLayout(`${sectionLabelById(sectionId)}セクションを移動しました`);
+}
+
+function toggleCardVisibility(cardId, hidden) {
+  const hiddenSet = new Set(layout.state.hiddenCardIds);
+  if (hidden) {
+    hiddenSet.add(cardId);
+  } else {
+    hiddenSet.delete(cardId);
+  }
+  layout.state.hiddenCardIds = [...hiddenSet];
+  persistAndApplyLayout(`${cardLabelById(cardId)}を${hidden ? "非表示" : "表示"}にしました`);
+}
+
+function resetLayoutToDefault() {
+  layout.state = defaultLayoutState();
+  saveLayoutStateToStorage(layout.state);
+  applyFullLayout();
+  announceLayout("レイアウトを初期配置に戻しました");
+}
+
+function setLayoutEditMode(enabled) {
+  layout.editMode = enabled;
+  const toggleBtn = document.getElementById("layoutEditToggle");
+  const editBar = document.getElementById("layoutEditBar");
+  if (toggleBtn) {
+    toggleBtn.setAttribute("aria-pressed", String(enabled));
+    toggleBtn.textContent = enabled ? "編集を終了" : "レイアウト編集";
+  }
+  if (editBar) editBar.hidden = !enabled;
+  document.body.classList.toggle("compact-layout-editing", enabled);
+  applyFullLayout();
+  announceLayout(enabled ? "レイアウト編集モードを開始しました" : "レイアウト編集モードを終了しました");
+}
+
+// 編集モード時、1カードぶんのドラッグハンドル+上下ボタン+表示切替チェックボックスを持つ
+// 操作行を組み立てる。カード本体(article.compact-card、既存の純粋レンダリング関数の出力)は
+// 変更せず、外側から包むだけにする。
+function buildCardEditControlsHtml(cardId, label, hidden) {
+  return `
+    <div class="compact-card-edit-controls">
+      <button type="button" class="compact-drag-handle" draggable="true" aria-label="${escapeHtml(label)}をドラッグして並べ替え">⠿⠿</button>
+      <button type="button" class="compact-move-btn" data-direction="-1" aria-label="${escapeHtml(label)}を上へ移動">▲</button>
+      <button type="button" class="compact-move-btn" data-direction="1" aria-label="${escapeHtml(label)}を下へ移動">▼</button>
+      <label class="compact-visibility-toggle">
+        <input type="checkbox" class="compact-visibility-checkbox" ${hidden ? "" : "checked"} aria-label="${escapeHtml(label)}を表示" />
+        表示
+      </label>
+    </div>`;
+}
+
+// 編集モード時、1セクションぶんのドラッグハンドル+上下ボタンを持つ操作行を組み立てる。
+function buildSectionEditBarHtml(sectionId, label) {
+  return `
+    <div class="compact-section-edit-bar" data-section-role="edit-bar">
+      <button type="button" class="compact-drag-handle compact-section-drag-handle" draggable="true" aria-label="${escapeHtml(label)}セクションをドラッグして並べ替え">⠿⠿ ${escapeHtml(label)}</button>
+      <button type="button" class="compact-move-btn compact-section-move-btn" data-direction="-1" aria-label="${escapeHtml(label)}セクションを上へ移動">▲</button>
+      <button type="button" class="compact-move-btn compact-section-move-btn" data-direction="1" aria-label="${escapeHtml(label)}セクションを下へ移動">▼</button>
+    </div>`;
+}
+
+// grid配下(直接の子だけでなく、既に.compact-card-editableでラップ済みの場合も含めて
+// 再帰的)から、data-card-id属性を持つ.compact-cardを集めてIDへ対応付ける。
+// data-card-idはDOM位置からの推測ではなく、各レンダリング関数(githubResourceCardHtml等)が
+// HTML生成時に直接埋め込んだ値をそのまま読む。再帰検索により、前回の適用でラップ済みの
+// カードも同じ関数で見つけられるため、この関数(および呼び出し元のapplyLayoutToSection)は
+// 何度呼んでも同じ入力に対して同じ結果になる(冪等)。
+function collectCardsById(gridEl) {
+  const byId = {};
+  gridEl.querySelectorAll(".compact-card[data-card-id]").forEach((el) => {
+    byId[el.dataset.cardId] = el;
+  });
+  return byId;
+}
+
+// 1セクションぶんのcard並べ替え・表示切替・編集モード操作行の付与をまとめて適用する。
+// loadCompact()の毎回のレンダリング後(30秒ごとの自動更新含む)や、編集モード切替・
+// move/hide/show/reset操作のたびに呼び出される。
+// 冪等性: collectCardsByIdは.compact-card-editableでラップ済みのカードも見つけられ、
+// fragment.appendChild(cardEl)はcardElを(元がどのラッパー内にあっても)自動的にそこから
+// 取り除いて新しい位置へ移動する(DOM標準の挙動)ため、二重ラップや取りこぼしは発生しない。
+// 最後にgrid.innerHTMLを空にしてfragmentだけを追加するため、古いラッパーの残骸も残らない。
+function applyLayoutToSection(sectionId) {
+  const meta = sectionMetaById(sectionId);
+  if (!meta || !meta.gridSelector) return;
+  const grid = document.querySelector(meta.gridSelector);
+  if (!grid) return;
+
+  const cardMetas = CARD_META_BY_SECTION[sectionId] || [];
+  const cardById = collectCardsById(grid);
+  const order = layout.state.cardOrderBySection[sectionId] || cardMetas.map((card) => card.id);
+  const hiddenSet = new Set(layout.state.hiddenCardIds);
+
+  // 非表示カードも(通常モードでは)DOMから取り除かず、CSSのdisplay:noneだけで隠す。
+  // 一度DOMから完全に取り除いてしまうと、次のfetchサイクル(30秒後)まで編集モードへ
+  // 戻っても再表示できなくなるため(「非表示カードの再表示」「hidden全件でも編集モードから
+  // 復元可能」という要件を満たすため、カードのDOM要素自体は常に保持する)。
+  const fragment = document.createDocumentFragment();
+  let visibleCount = 0;
+  for (const cardId of order) {
+    const cardEl = cardById[cardId];
+    if (!cardEl) continue;
+    const hidden = hiddenSet.has(cardId);
+    if (!hidden) visibleCount += 1;
+
+    if (layout.editMode) {
+      cardEl.classList.remove("compact-card-hidden-mode");
+      const wrapper = document.createElement("div");
+      wrapper.className = "compact-card-editable" + (hidden ? " compact-card-editable-hidden" : "");
+      wrapper.dataset.cardId = cardId;
+      wrapper.dataset.sectionId = sectionId;
+      wrapper.innerHTML = buildCardEditControlsHtml(cardId, cardLabelById(cardId), hidden);
+      wrapper.appendChild(cardEl);
+      fragment.appendChild(wrapper);
+    } else {
+      cardEl.classList.toggle("compact-card-hidden-mode", hidden);
+      fragment.appendChild(cardEl);
+    }
+  }
+
+  if (visibleCount === 0 && !layout.editMode) {
+    const notice = document.createElement("div");
+    notice.className = "compact-card compact-empty compact-all-hidden-notice";
+    notice.textContent = "すべてのカードが非表示です（レイアウト編集で再表示できます）";
+    fragment.insertBefore(notice, fragment.firstChild);
+  }
+  grid.innerHTML = "";
+  grid.appendChild(fragment);
+}
+
+// セクション自体(GitHub/Claude/Codex/ダッシュボード)のDOM順を保存順へ並べ替え、
+// 編集モードなら各セクション先頭へドラッグハンドル+上下ボタンの操作行を挿入する。
+function applySectionLayout() {
+  const main = document.getElementById("mainSections");
+  if (!main) return;
+
+  for (const sectionId of layout.state.sectionOrder) {
+    const meta = sectionMetaById(sectionId);
+    const el = meta && document.getElementById(meta.containerId);
+    if (el) main.appendChild(el);
+  }
+
+  document.querySelectorAll('[data-section-role="edit-bar"]').forEach((el) => el.remove());
+  if (layout.editMode) {
+    for (const meta of SECTION_META) {
+      const el = document.getElementById(meta.containerId);
+      if (!el) continue;
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = buildSectionEditBarHtml(meta.id, meta.label);
+      el.insertBefore(wrapper.firstElementChild, el.firstChild);
+    }
+  }
+}
+
+// セクション順・各セクション内のcard順/表示状態/編集モード操作行を、現在のlayout stateに
+// 合わせて丸ごと再適用する。データ取得(loadCompact)の成否には関与しない表示専用の処理。
+function applyFullLayout() {
+  applySectionLayout();
+  for (const sectionId of Object.keys(CARD_META_BY_SECTION)) {
+    applyLayoutToSection(sectionId);
+  }
+}
+
+let dragContext = null;
+
+function clearDragVisualState() {
+  document.querySelectorAll(".compact-dragging, .compact-drag-over").forEach((el) => {
+    el.classList.remove("compact-dragging", "compact-drag-over");
+  });
+}
+
+// ドラッグ&ドロップ(HTML5 Drag and Drop API)。編集モードでのみdraggable要素が
+// 存在するため、通常モードでは誤操作によるドラッグは発生しない。
+// タッチ環境ではHTML5 DnDの挙動が不安定なため、タッチ操作は上下ボタン(標準button要素、
+// タップ操作可能)を主経路として案内する(ドラッグはマウス操作の補助手段と位置づける)。
+function setupLayoutEventDelegation() {
+  const main = document.getElementById("mainSections");
+  if (!main) return;
+
+  main.addEventListener("click", (event) => {
+    const moveBtn = event.target.closest(".compact-move-btn");
+    if (!moveBtn) return;
+    const direction = Number(moveBtn.dataset.direction);
+    const cardWrapper = moveBtn.closest(".compact-card-editable");
+    if (cardWrapper) {
+      moveCard(cardWrapper.dataset.sectionId, cardWrapper.dataset.cardId, direction);
+      return;
+    }
+    const sectionEl = moveBtn.closest("section[data-section-id]");
+    if (sectionEl) {
+      moveSection(sectionEl.dataset.sectionId, direction);
+    }
+  });
+
+  main.addEventListener("change", (event) => {
+    const checkbox = event.target.closest(".compact-visibility-checkbox");
+    if (!checkbox) return;
+    const wrapper = checkbox.closest(".compact-card-editable");
+    if (wrapper) toggleCardVisibility(wrapper.dataset.cardId, !checkbox.checked);
+  });
+
+  main.addEventListener("dragstart", (event) => {
+    const sectionHandle = event.target.closest(".compact-section-drag-handle");
+    const cardHandle = !sectionHandle && event.target.closest(".compact-drag-handle");
+    if (sectionHandle) {
+      const sectionEl = sectionHandle.closest("section[data-section-id]");
+      if (!sectionEl) return;
+      dragContext = { type: "section", id: sectionEl.dataset.sectionId };
+      sectionEl.classList.add("compact-dragging");
+    } else if (cardHandle) {
+      const wrapper = cardHandle.closest(".compact-card-editable");
+      if (!wrapper) return;
+      dragContext = { type: "card", sectionId: wrapper.dataset.sectionId, id: wrapper.dataset.cardId };
+      wrapper.classList.add("compact-dragging");
+    } else {
+      return;
+    }
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      try {
+        event.dataTransfer.setData("text/plain", dragContext.id);
+      } catch (error) {
+        // 一部環境ではsetDataが例外を投げることがあるが、dragContext自体で状態は追跡できる。
+      }
+    }
+  });
+
+  main.addEventListener("dragover", (event) => {
+    if (!dragContext) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    if (dragContext.type === "card") {
+      const overWrapper = event.target.closest(".compact-card-editable");
+      document.querySelectorAll(".compact-drag-over").forEach((el) => el.classList.remove("compact-drag-over"));
+      if (overWrapper && overWrapper.dataset.sectionId === dragContext.sectionId) {
+        overWrapper.classList.add("compact-drag-over");
+      }
+    } else if (dragContext.type === "section") {
+      const overSection = event.target.closest("section[data-section-id]");
+      document.querySelectorAll(".compact-drag-over").forEach((el) => el.classList.remove("compact-drag-over"));
+      if (overSection) overSection.classList.add("compact-drag-over");
+    }
+  });
+
+  main.addEventListener("drop", (event) => {
+    if (!dragContext) return;
+    event.preventDefault();
+    if (dragContext.type === "card") {
+      const overWrapper = event.target.closest(".compact-card-editable");
+      if (overWrapper && overWrapper.dataset.sectionId === dragContext.sectionId) {
+        const order = layout.state.cardOrderBySection[dragContext.sectionId] || [];
+        const targetIndex = order.indexOf(overWrapper.dataset.cardId);
+        if (targetIndex !== -1) moveCardToIndex(dragContext.sectionId, dragContext.id, targetIndex);
+      }
+    } else if (dragContext.type === "section") {
+      const overSection = event.target.closest("section[data-section-id]");
+      if (overSection) {
+        const targetIndex = layout.state.sectionOrder.indexOf(overSection.dataset.sectionId);
+        if (targetIndex !== -1) moveSectionToIndex(dragContext.id, targetIndex);
+      }
+    }
+    dragContext = null;
+    clearDragVisualState();
+  });
+
+  main.addEventListener("dragend", () => {
+    dragContext = null;
+    clearDragVisualState();
+  });
 }
 
 function renderLastRendered() {
@@ -646,10 +1182,27 @@ async function loadCompact() {
     document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
   } finally {
     renderLastRendered();
+    // innerHTML差し替え(上のrender*)で失われるカード/セクションの並び順・表示状態を、
+    // 保存済みのlayout stateへ合わせて毎回(30秒ごとの自動更新を含む)再適用する。
+    applyFullLayout();
   }
 }
 
 function initCompact() {
+  layout.state = loadLayoutStateFromStorage();
+  setupLayoutEventDelegation();
+  const layoutEditToggle = document.querySelector("#layoutEditToggle");
+  if (layoutEditToggle) {
+    layoutEditToggle.addEventListener("click", () => {
+      setLayoutEditMode(!layout.editMode);
+    });
+  }
+  const layoutResetButton = document.querySelector("#layoutResetButton");
+  if (layoutResetButton) {
+    layoutResetButton.addEventListener("click", () => {
+      if (confirmLayoutReset()) resetLayoutToDefault();
+    });
+  }
   document.querySelector("#reloadButton").addEventListener("click", () => {
     loadCompact();
   });
@@ -693,5 +1246,19 @@ if (typeof module !== "undefined") {
     resolveCodexDisplay,
     codexPeriodicRefreshNoticeHtml,
     codexUsageSectionHtml,
+    LAYOUT_STORAGE_KEY,
+    LAYOUT_VERSION,
+    SECTION_META,
+    CARD_META_BY_SECTION,
+    DEFAULT_SECTION_ORDER,
+    ALL_KNOWN_CARD_IDS,
+    defaultLayoutState,
+    sanitizeIdOrder,
+    sanitizeLayoutState,
+    loadLayoutStateFromRaw,
+    serializeLayoutState,
+    moveIdToIndex,
+    buildCardEditControlsHtml,
+    buildSectionEditBarHtml,
   };
 }
