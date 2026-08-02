@@ -133,15 +133,46 @@ function fmtGithubDateUtc(value) {
   return d.toLocaleString("ja-JP", { timeZone: "UTC" }) + " UTC";
 }
 
+// DOMに触れない純粋関数: 0以上の経過秒数を日本語の期間表記へ変換する（「あと」は含まない）。
+// 常時監視用の簡易画面(別ファイル)にある同名関数と同一ロジック(両画面で表示結果を揃えるため)。
+// 「h」「m」等の略記は使わず、1分未満/分単位/時間+分/日+時間の4段階で表す。
+// 0になる単位（例: ちょうど1時間）は省略する（「1時間 0分」ではなく「1時間」）。
+function fmtDurationJa(totalSeconds) {
+  if (totalSeconds < 60) return "1分未満";
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}分`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  const remMinutes = totalMinutes % 60;
+  if (totalHours < 24) return remMinutes > 0 ? `${totalHours}時間 ${remMinutes}分` : `${totalHours}時間`;
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  return remHours > 0 ? `${days}日 ${remHours}時間` : `${days}日`;
+}
+
+// DOMに触れない純粋関数: 絶対時刻の表記と相対時間の表記を1行で併記する。
+// 相対情報が無い/不明/staleで抑制された場合は絶対時刻のみを返す。
+function fmtAbsoluteWithRelative(absoluteText, relativeText) {
+  if (!relativeText || relativeText === "不明") return absoluteText;
+  return `${absoluteText}（${relativeText}）`;
+}
+
+// DOMに触れない純粋関数: stale(最終確認値が古い可能性がある)なデータでは、
+// 現在も有効なreset予定であるかのように誤認させる「あと...」という将来カウントダウンを出さない。
+function suppressCountdownIfStale(relativeText, stale) {
+  if (!stale) return relativeText;
+  return relativeText.startsWith("あと") ? "" : relativeText;
+}
+
 function fmtSecondsUntilReset(seconds) {
   if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "不明";
   if (seconds < 0) return "リセット時刻超過";
-  if (seconds < 60) return `あと${seconds}秒`;
-  return `あと${Math.floor(seconds / 60)}分`;
+  return `あと${fmtDurationJa(seconds)}`;
 }
 
 // DOMに触れない純粋関数: dataからHTML文字列を組み立てるだけ。テスト容易性のため分離している。
-function githubResourceCardHtml(resource) {
+// stale=trueはlast_known(直近取得失敗時の最終成功値)由来を意味し、resetまでの「あと...」
+// カウントダウンは抑制する(絶対時刻はそのまま表示する)。
+function githubResourceCardHtml(resource, stale = false) {
   if (!resource) return "";
   const statusHtml = `<span class="github-resource-status ${githubStatusClass(resource.status)}">${escapeHtml(resource.status)}</span>`;
   if (resource.status === "Error") {
@@ -152,15 +183,16 @@ function githubResourceCardHtml(resource) {
         <div class="github-resource-error">${escapeHtml(resource.error_message || "")}</div>
       </div>`;
   }
+  const relativeText = suppressCountdownIfStale(fmtSecondsUntilReset(resource.seconds_until_reset), stale);
+  const resetText = fmtAbsoluteWithRelative(fmtGithubDate(resource.reset_at_local), relativeText);
   return `
     <div class="github-resource-card">
       <div class="github-resource-title">${escapeHtml(githubResourceLabel(resource.resource))}</div>
       ${statusHtml}
       <div class="github-resource-metric">残り ${fmtNumber(resource.remaining)} / ${fmtNumber(resource.limit)}</div>
       <div class="github-resource-metric">使用 ${fmtNumber(resource.used)}（${fmtNumber(resource.usage_percent)}%）</div>
-      <div class="github-resource-metric">reset: ${fmtGithubDate(resource.reset_at_local)}</div>
+      <div class="github-resource-metric">reset: ${resetText}</div>
       <div class="github-resource-metric muted">reset (UTC): ${fmtGithubDateUtc(resource.reset_at_utc)}</div>
-      <div class="github-resource-metric">${fmtSecondsUntilReset(resource.seconds_until_reset)}</div>
     </div>`;
 }
 
@@ -174,8 +206,7 @@ function githubAutoRefreshNoticeHtml(data) {
     return `<p class="muted">自動確認中…</p>`;
   }
   if (data.auto_refresh_pending && data.next_auto_refresh_at) {
-    const secondsUntil = Math.floor((new Date(data.next_auto_refresh_at).getTime() - Date.now()) / 1000);
-    const relative = Number.isNaN(secondsUntil) ? "" : secondsUntil > 0 ? `（${fmtSecondsUntilReset(secondsUntil)}）` : "（まもなく）";
+    const relative = relativeSuffixFromIso(data.next_auto_refresh_at);
     return `<p class="muted">reset後に1回だけ、アプリが自動で再取得します。アプリの次回取得予定: ${fmtGithubDate(data.next_auto_refresh_at)}${relative}</p>`;
   }
   if (data.last_auto_refresh_error) {
@@ -301,9 +332,9 @@ function githubRateLimitHtml(data) {
     ${overallHtml}
     ${autoRefreshNoticeHtml}
     <div class="github-resource-cards">
-      ${githubResourceCardHtml(displayResources.core)}
-      ${githubResourceCardHtml(displayResources.graphql)}
-      ${displayResources.search ? githubResourceCardHtml(displayResources.search) : ""}
+      ${githubResourceCardHtml(displayResources.core, usingLastKnown)}
+      ${githubResourceCardHtml(displayResources.graphql, usingLastKnown)}
+      ${displayResources.search ? githubResourceCardHtml(displayResources.search, usingLastKnown) : ""}
     </div>`;
 }
 
@@ -484,10 +515,19 @@ function renderCodexUsage(data) {
   }
 }
 
+// 自動更新間隔は「あと」を伴わない期間の長さそのものなので、fmtDurationJaの結果をそのまま使う。
 function fmtMinutesFromSeconds(seconds) {
   if (typeof seconds !== "number" || Number.isNaN(seconds)) return "不明";
-  const minutes = Math.round(seconds / 60);
-  return `${minutes}分`;
+  return fmtDurationJa(Math.max(seconds, 0));
+}
+
+// DOMに触れない純粋関数: ISO時刻までの相対時間を「（あと...）」/「（まもなく）」の形で返す。
+// 過去や不正な値では空文字を返す(呼び出し側で絶対時刻のみにフォールバックする)。
+function relativeSuffixFromIso(isoString) {
+  if (!isoString) return "";
+  const secondsUntil = Math.floor((new Date(isoString).getTime() - Date.now()) / 1000);
+  if (Number.isNaN(secondsUntil)) return "";
+  return secondsUntil > 0 ? `（${fmtSecondsUntilReset(secondsUntil)}）` : "（まもなく）";
 }
 
 // Codex App Server(account/rateLimits/read)の自動取得状態のみを表示する。
@@ -513,7 +553,9 @@ function renderCodexRateLimits(data) {
 
   const autoRefreshEnabledText = data.auto_refresh_enabled ? "有効" : "無効";
   const autoRefreshIntervalText = fmtMinutesFromSeconds(data.auto_refresh_interval_seconds);
-  const nextAutoRefreshText = data.next_auto_refresh_at ? fmtDate(data.next_auto_refresh_at) : "未定";
+  const nextAutoRefreshText = data.next_auto_refresh_at
+    ? `${fmtDate(data.next_auto_refresh_at)}${relativeSuffixFromIso(data.next_auto_refresh_at)}`
+    : "未定";
   const lastAutoAttemptText = data.last_auto_refresh_attempt_at ? fmtDate(data.last_auto_refresh_attempt_at) : "未実行";
   const lastAutoSuccessText = data.last_auto_refresh_success_at ? fmtDate(data.last_auto_refresh_success_at) : "未成功";
 
@@ -1070,6 +1112,9 @@ if (typeof module !== "undefined") {
     githubStatusClass,
     githubOverallClass,
     fmtGithubDateUtc,
+    fmtDurationJa,
+    fmtAbsoluteWithRelative,
+    suppressCountdownIfStale,
     fmtSecondsUntilReset,
     githubResourceCardHtml,
     githubRateLimitHtml,

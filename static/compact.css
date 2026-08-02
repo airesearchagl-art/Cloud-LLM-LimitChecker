@@ -3,6 +3,11 @@
   font-family: Arial, "Hiragino Sans", "Yu Gothic", sans-serif;
   background: #0f1419;
   color: #e6edf3;
+  /* provider識別専用のアクセント色。Warning/Error/RATE LIMITED等の状態色とは別チャンネル
+     (カード縁のinset box-shadow)で使うため、状態色のCSSルールには一切触れない。 */
+  --provider-github: #9aa4af;
+  --provider-claude: #e0895c;
+  --provider-codex: #2dd4a7;
 }
 
 * {
@@ -107,6 +112,34 @@ body {
 
 .compact-github-card {
   padding: 7px 8px;
+}
+
+/* providerの識別専用アクセント。単純なborder-leftではなくinset box-shadowを使い、
+   .compact-cardの既存border(全周)やstatusバッジ・バナー自体の状態色とは競合しない
+   別レイヤーとして扱う。色だけに依存しないよう、カード側の文字ラベルでも
+   "GitHub "/"Claude "/"Codex "を明示している。 */
+.compact-provider-github {
+  box-shadow: inset 3px 0 0 var(--provider-github);
+}
+
+.compact-provider-claude {
+  box-shadow: inset 3px 0 0 var(--provider-claude);
+}
+
+.compact-provider-codex {
+  box-shadow: inset 3px 0 0 var(--provider-codex);
+}
+
+.compact-provider-github .compact-service-name {
+  color: var(--provider-github);
+}
+
+.compact-provider-claude .compact-service-name {
+  color: var(--provider-claude);
+}
+
+.compact-provider-codex .compact-service-name {
+  color: var(--provider-codex);
 }
 
 .compact-empty {

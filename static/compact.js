@@ -54,6 +54,37 @@ function sourceTypeLabel(sourceType) {
   return labels[sourceType] || sourceType || "未取得";
 }
 
+// DOMに触れない純粋関数: 0以上の経過秒数を日本語の期間表記へ変換する（「あと」は含まない）。
+// 「h」「m」等の略記は使わず、1分未満/分単位/時間+分/日+時間の4段階で表す。
+// 0になる単位（例: ちょうど1時間）は省略する（「1時間 0分」ではなく「1時間」）。
+// 呼び出し側（resetRelativeText等）が符号判定と「あと」プレフィックスを担当する。
+function fmtDurationJa(totalSeconds) {
+  if (totalSeconds < 60) return "1分未満";
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}分`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  const remMinutes = totalMinutes % 60;
+  if (totalHours < 24) return remMinutes > 0 ? `${totalHours}時間 ${remMinutes}分` : `${totalHours}時間`;
+  const days = Math.floor(totalHours / 24);
+  const remHours = totalHours % 24;
+  return remHours > 0 ? `${days}日 ${remHours}時間` : `${days}日`;
+}
+
+// DOMに触れない純粋関数: 絶対時刻の表記と相対時間の表記を1行で併記する。
+// 相対情報が無い/不明/未設定/staleで抑制された場合は絶対時刻のみを返す。
+function fmtAbsoluteWithRelative(absoluteText, relativeText) {
+  if (!relativeText || relativeText === "不明" || relativeText === "未設定") return absoluteText;
+  return `${absoluteText}（${relativeText}）`;
+}
+
+// DOMに触れない純粋関数: stale(最終確認値が古い可能性がある)なデータでは、
+// 現在も有効なreset予定であるかのように誤認させる「あと...」という将来カウントダウンを出さない。
+// 「reset時刻超過」「不明」「未設定」はカウントダウンの主張ではない事実表記のため、staleでも維持する。
+function suppressCountdownIfStale(relativeText, stale) {
+  if (!stale) return relativeText;
+  return relativeText.startsWith("あと") ? "" : relativeText;
+}
+
 // next_reset_atはISO文字列またはnull。負数の秒数を表示せず「reset時刻超過」に丸める。
 function resetRelativeText(nextResetAt) {
   if (!nextResetAt) return "未設定";
@@ -61,18 +92,14 @@ function resetRelativeText(nextResetAt) {
   if (Number.isNaN(target.getTime())) return "不明";
   const diffSeconds = Math.floor((target.getTime() - Date.now()) / 1000);
   if (diffSeconds < 0) return "reset時刻超過";
-  if (diffSeconds < 60) return `あと${diffSeconds}秒`;
-  if (diffSeconds < 3600) return `あと${Math.floor(diffSeconds / 60)}分`;
-  return `あと${Math.floor(diffSeconds / 3600)}時間`;
+  return `あと${fmtDurationJa(diffSeconds)}`;
 }
 
 // サーバー側のseconds_until_resetは負値になり得るため、同様に丸める。
 function githubSecondsUntilResetText(seconds) {
   if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "不明";
   if (seconds < 0) return "reset時刻超過";
-  if (seconds < 60) return `あと${seconds}秒`;
-  if (seconds < 3600) return `あと${Math.floor(seconds / 60)}分`;
-  return `あと${Math.floor(seconds / 3600)}時間`;
+  return `あと${fmtDurationJa(seconds)}`;
 }
 
 // Error(取得失敗)はUnknown/未取得(灰)とは別に、赤系との識別のため濃い橙で区別する。
@@ -154,14 +181,18 @@ function limitCardHtml(row) {
 }
 
 // DOMに触れない純粋関数: GitHubの1リソース分のカードHTMLを組み立てる。UTC詳細は表示しない。
-function githubResourceCardHtml(resource) {
+// stale=trueはlast_known(直近取得失敗時の最終成功値)由来を意味し、resetまでの「あと...」
+// カウントダウンは抑制する(絶対時刻はそのまま表示する)。
+// providerの識別は色(box-shadow)だけに依存させず、"GitHub "を明示ラベルとして付与する。
+function githubResourceCardHtml(resource, stale = false) {
   if (!resource) return "";
   const statusClass = githubStatusClass(resource.status);
+  const titleHtml = `<span class="compact-service-name">${escapeHtml(`GitHub ${githubResourceLabel(resource.resource)}`)}</span>`;
   if (resource.status === "Error") {
     return `
-      <article class="compact-card compact-github-card">
+      <article class="compact-card compact-github-card compact-provider-github">
         <div class="compact-card-head">
-          <span class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</span>
+          ${titleHtml}
           <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
         </div>
         <div class="compact-usage-line">${escapeHtml(resource.error_message || "")}</div>
@@ -181,14 +212,17 @@ function githubResourceCardHtml(resource) {
     `
     : `<div class="compact-no-limit">上限未登録</div>`;
 
+  const relativeText = suppressCountdownIfStale(githubSecondsUntilResetText(resource.seconds_until_reset), stale);
+  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(resource.reset_at_local), relativeText);
+
   return `
-    <article class="compact-card compact-github-card">
+    <article class="compact-card compact-github-card compact-provider-github">
       <div class="compact-card-head">
-        <span class="compact-service-name">${escapeHtml(githubResourceLabel(resource.resource))}</span>
+        ${titleHtml}
         <span class="compact-status ${statusClass}">${escapeHtml(resource.status)}</span>
       </div>
       ${bodyBlock}
-      <div class="compact-meta-row"><span>reset: ${githubSecondsUntilResetText(resource.seconds_until_reset)}</span></div>
+      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
     </article>
   `;
 }
@@ -305,9 +339,9 @@ function githubSectionHtml(data) {
       ${githubOverallHtml(overall)}
       ${autoRefreshNoticeHtml}
       <div class="compact-github-grid-inner">
-        ${githubResourceCardHtml(resources.core)}
-        ${githubResourceCardHtml(resources.graphql)}
-        ${resources.search ? githubResourceCardHtml(resources.search) : ""}
+        ${githubResourceCardHtml(resources.core, true)}
+        ${githubResourceCardHtml(resources.graphql, true)}
+        ${resources.search ? githubResourceCardHtml(resources.search, true) : ""}
       </div>`;
   }
 
@@ -324,17 +358,20 @@ function githubSectionHtml(data) {
 
 // DOMに触れない純粋関数: Claude Code statusLineブリッジのキャッシュ1枠分(5時間 or 7日)のカードHTMLを組み立てる。
 // remaining/usedはブリッジ側で既に0-100%へ検証済みの値のみを渡される想定。
-function claudeUsageWindowHtml(label, window) {
+// stale=trueは最終観測値が古い可能性があることを意味し、resetまでの「あと...」カウントダウンは抑制する。
+function claudeUsageWindowHtml(label, window, stale = false) {
   if (!window) {
     return `
-      <article class="compact-card">
+      <article class="compact-card compact-provider-claude">
         <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
         <div class="compact-no-limit">未観測</div>
       </article>`;
   }
   const width = Math.min(Math.max(window.used_percentage, 0), 100);
+  const relativeText = suppressCountdownIfStale(resetRelativeText(window.resets_at), stale);
+  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(window.resets_at), relativeText);
   return `
-    <article class="compact-card">
+    <article class="compact-card compact-provider-claude">
       <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
       <div class="compact-percent-row">
         <span class="compact-percent-label">残り</span>
@@ -342,12 +379,13 @@ function claudeUsageWindowHtml(label, window) {
       </div>
       <div class="compact-usage-line">使用済み ${fmtNumber(window.used_percentage)}%</div>
       <div class="compact-meter"><div class="compact-meter-fill compact-claude-usage" style="width:${width}%"></div></div>
-      <div class="compact-meta-row"><span>reset: ${resetRelativeText(window.resets_at)}</span></div>
+      <div class="compact-meta-row"><span>reset: ${resetText}</span></div>
     </article>`;
 }
 
 // DOMに触れない純粋関数: GET /api/claude-code-usage のレスポンスからセクションHTMLを組み立てる。
 // statusLineはpush型のため、staleは「取得不可」ではなく「最終観測値が古い」という意味で表示する。
+// providerの識別は色だけに依存させず、カード内ラベルへ"Claude "を明示する。
 function claudeCodeSectionHtml(data) {
   if (!data || !data.available) {
     const message = data && data.status === "invalid_cache" ? "取得不可" : "Claude Code実行後に取得";
@@ -361,8 +399,8 @@ function claudeCodeSectionHtml(data) {
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${claudeUsageWindowHtml("5時間枠", data.five_hour)}
-      ${claudeUsageWindowHtml("7日枠", data.seven_day)}
+      ${claudeUsageWindowHtml("Claude 5時間枠", data.five_hour, data.stale)}
+      ${claudeUsageWindowHtml("Claude 7日枠", data.seven_day, data.stale)}
     </div>
     <div class="compact-stale-notice">最終観測: ${fmtDateOrUnknown(data.observed_at)}</div>
   `;
@@ -372,16 +410,20 @@ function claudeCodeSectionHtml(data) {
 // remaining/usedは呼び出し元(自動adapterまたは管理画面保存時)で既に0-100%へ検証済みの値のみを渡される想定。
 // resets_atを過ぎている場合は、古いpercentageを現在値のように強調表示せず「reset時刻超過」だけを示す。
 // badgeLabelは表示中のsourceを示すバッジ文言(「自動取得」「最終自動取得値」「手動確認値」)。
-function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値") {
+// stale=trueは最終観測値が古い可能性があることを意味し、resetまでの「あと...」カウントダウンは抑制する
+// (reset時刻超過自体は事実表記のため、staleでも維持しresetExceeded判定にも使う)。
+function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", stale = false) {
   if (!window) {
     return `
-      <article class="compact-card">
+      <article class="compact-card compact-provider-codex">
         <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
         <div class="compact-no-limit">未入力</div>
       </article>`;
   }
-  const resetText = resetRelativeText(window.resets_at);
-  const resetExceeded = resetText === "reset時刻超過";
+  const rawRelative = resetRelativeText(window.resets_at);
+  const resetExceeded = rawRelative === "reset時刻超過";
+  const relativeText = suppressCountdownIfStale(rawRelative, stale);
+  const resetText = fmtAbsoluteWithRelative(fmtDateOrUnknown(window.resets_at), relativeText);
   const bodyBlock = resetExceeded
     ? `<div class="compact-no-limit">reset時刻超過</div>`
     : (() => {
@@ -396,7 +438,7 @@ function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値") {
         `;
       })();
   return `
-    <article class="compact-card">
+    <article class="compact-card compact-provider-codex">
       <div class="compact-card-head">
         <span class="compact-service-name">${escapeHtml(label)}</span>
         <span class="compact-source-badge">${escapeHtml(badgeLabel)}</span>
@@ -448,21 +490,26 @@ function resolveCodexDisplay(auto, manual) {
 
 // DOMに触れない純粋関数: GET /api/codex-rate-limits(自動取得) と GET /api/codex-usage(手動入力) の
 // レスポンスからCodex Usageセクション全体のHTMLを組み立てる。
+// 自動更新間隔は「あと」を伴わない期間の長さそのものなので、fmtDurationJaの結果をそのまま使う。
 function fmtMinutesFromSeconds(seconds) {
   if (typeof seconds !== "number" || Number.isNaN(seconds)) return "不明";
-  return `${Math.round(seconds / 60)}分`;
+  return fmtDurationJa(Math.max(seconds, 0));
 }
 
 // DOMに触れない純粋関数: サーバー側10分間隔schedulerの状態(GET /api/codex-rate-limitsに
 // 含まれるauto_refresh_interval_seconds / next_auto_refresh_at)を1行だけ表示する。
-// ここから更新系リクエストを送ることはない(表示専用)。
+// ここから更新系リクエストを送ることはない(表示専用)。「自動更新間隔」(intervalText)と
+// 「次回取得予定」(nextText、こちらは常に有効な将来予定なので「あと」付きの相対時間を併記する)を混同しない。
 function codexPeriodicRefreshNoticeHtml(auto) {
   if (!auto || typeof auto.auto_refresh_interval_seconds !== "number") return "";
   const intervalText = fmtMinutesFromSeconds(auto.auto_refresh_interval_seconds);
-  const nextText = auto.next_auto_refresh_at ? fmtDateOrUnknown(auto.next_auto_refresh_at) : "未定";
+  const nextText = auto.next_auto_refresh_at
+    ? fmtAbsoluteWithRelative(fmtDateOrUnknown(auto.next_auto_refresh_at), resetRelativeText(auto.next_auto_refresh_at))
+    : "未定";
   return `<div class="compact-stale-notice">自動更新: ${escapeHtml(intervalText)} / 次回予定: ${escapeHtml(nextText)}</div>`;
 }
 
+// providerの識別は色だけに依存させず、カード内ラベルへ"Codex "を明示する。
 function codexUsageSectionHtml(auto, manual) {
   const resolved = resolveCodexDisplay(auto, manual);
   if (!resolved.source) {
@@ -481,8 +528,8 @@ function codexUsageSectionHtml(auto, manual) {
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${codexUsageWindowHtml("5時間枠", resolved.five_hour, resolved.badgeLabel)}
-      ${codexUsageWindowHtml("週次枠", resolved.weekly, resolved.badgeLabel)}
+      ${codexUsageWindowHtml("Codex 5時間枠", resolved.five_hour, resolved.badgeLabel, resolved.stale)}
+      ${codexUsageWindowHtml("Codex 週次枠", resolved.weekly, resolved.badgeLabel, resolved.stale)}
     </div>
     <div class="compact-stale-notice">${lastLabel}: ${fmtDateOrUnknown(resolved.observed_at)}</div>
     ${codexPeriodicRefreshNoticeHtml(auto)}
@@ -559,6 +606,9 @@ if (typeof module !== "undefined") {
     fmtDateOrUnknown,
     dashboardStatusClass,
     sourceTypeLabel,
+    fmtDurationJa,
+    fmtAbsoluteWithRelative,
+    suppressCountdownIfStale,
     resetRelativeText,
     githubSecondsUntilResetText,
     githubStatusClass,
