@@ -3,6 +3,12 @@
   font-family: Arial, "Hiragino Sans", "Yu Gothic", sans-serif;
   background: #f4f6f7;
   color: #182126;
+  /* provider識別専用のアクセント色。Warning/Error/RATE LIMITED等の状態色とは別チャンネル
+     (パネル/カード縁のinset box-shadow)で使うため、状態色のCSSルールには一切触れない。
+     常時監視用の簡易画面(別ファイル)と同系統の色相を、白背景でのコントラスト確保のため濃くしている。 */
+  --provider-github: #5c6672;
+  --provider-claude: #c1622f;
+  --provider-codex: #0e8f6f;
 }
 
 body {
@@ -605,6 +611,21 @@ button:hover {
 #githubRateLimitPanel .panel-heading button {
   min-width: 120px;
   width: auto;
+}
+
+/* providerの識別専用アクセント。単純なborder-leftではなくinset box-shadowを使い、
+   .panel/.cardの既存border(全周)やstatusバッジ・バナー自体の状態色とは競合しない
+   別レイヤーとして扱う。色だけに依存しないよう、パネル見出し・カードの文字ラベル
+   ("GitHub API Rate Limit"見出しやgithubResourceLabel()の"GitHub ..."表記、
+   "Codex Usage"見出し)でも識別できる。 */
+#githubRateLimitPanel,
+.github-resource-card {
+  box-shadow: inset 3px 0 0 var(--provider-github);
+}
+
+#codexRateLimitsPanel,
+#codexUsagePanel {
+  box-shadow: inset 3px 0 0 var(--provider-codex);
 }
 
 .github-overall {
