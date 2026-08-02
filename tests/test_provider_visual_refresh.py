@@ -324,6 +324,193 @@ def test_app_rate_limited_banner_still_renders_with_existing_classes():
     assert "github-banner-limited" in html
 
 
+# --- 修正必須1: 未取得/未観測のemptyカードにもProviderアクセントを適用する -----
+
+
+def test_compact_github_empty_card_has_provider_class_and_name():
+    html = run_compact_js("compact.githubSectionHtml({fetched: false, last_known: null})")
+    assert "compact-provider-github" in html
+    assert "GitHub" in html
+
+
+def test_compact_claude_empty_card_has_provider_class_and_name():
+    html = run_compact_js('compact.claudeCodeSectionHtml({available: false, status: "not_observed"})')
+    assert "compact-provider-claude" in html
+    assert "Claude" in html
+
+    invalid_html = run_compact_js('compact.claudeCodeSectionHtml({available: false, status: "invalid_cache"})')
+    assert "compact-provider-claude" in invalid_html
+    assert "Claude" in invalid_html
+
+
+def test_compact_codex_empty_card_has_provider_class_and_name():
+    html = run_compact_js(
+        'compact.codexUsageSectionHtml({available: false, status: "not_observed"}, {available: false, status: "not_observed"})'
+    )
+    assert "compact-provider-codex" in html
+    assert "Codex" in html
+
+    invalid_html = run_compact_js(
+        'compact.codexUsageSectionHtml({available: false, status: "invalid_cache"}, {available: false, status: "invalid_cache"})'
+    )
+    assert "compact-provider-codex" in invalid_html
+    assert "Codex" in invalid_html
+
+
+# 個別window単位の未観測/未入力カードにも既にproviderクラスが付いていることを確認する
+def test_compact_claude_window_unobserved_has_provider_class():
+    html = run_compact_js('compact.claudeUsageWindowHtml("Claude 5時間枠", null)')
+    assert "compact-provider-claude" in html
+    assert "未観測" in html
+
+
+def test_compact_codex_window_unentered_has_provider_class():
+    html = run_compact_js('compact.codexUsageWindowHtml("Codex 5時間枠", null)')
+    assert "compact-provider-codex" in html
+    assert "未入力" in html
+
+
+# empty状態でも既存のstatus/banner色(CSSルール)は変更されていないことの確認
+def test_compact_empty_card_class_addition_does_not_touch_status_css():
+    css = COMPACT_CSS.read_text(encoding="utf-8")
+    for cls in (".compact-status-unknown", ".compact-empty"):
+        assert f"{cls} {{" in css
+
+
+# --- 修正必須2: アプリ予定用の相対時間をresetまでの相対時間から分離する ---------
+
+APP_SCHEDULE_FUTURE_CASES = [
+    # 分の境界ちょうど(例: 7980 = 133*60)は、同一tick内での関数呼び出しにかかる
+    # わずかな経過時間だけでfloor()が切り下がりflakyになるため避け、余裕を持たせる。
+    (2 * 3600 + 13 * 60 + 5, "あと2時間 13分"),
+    (5, "あと1分未満"),
+]
+
+
+def _iso_offset(seconds_from_now: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds_from_now)).isoformat()
+
+
+def _js_future_expr(offset_seconds: int) -> str:
+    # オフセット計算とfmtAppScheduleRelative呼び出しを同一node процессの同一tick内で行い、
+    # Python側とnode側のプロセス間クロックずれ(subprocess起動オーバーヘッド)による
+    # 分境界での1分ズレ(flaky)を避ける。
+    return f"new Date(Date.now() + {offset_seconds} * 1000).toISOString()"
+
+
+def test_app_schedule_relative_future_app():
+    for offset, expected in APP_SCHEDULE_FUTURE_CASES:
+        assert run_app_js(f"app.fmtAppScheduleRelative({_js_future_expr(offset)})") == expected
+
+
+def test_app_schedule_relative_future_compact():
+    for offset, expected in APP_SCHEDULE_FUTURE_CASES:
+        assert run_compact_js(f"compact.fmtAppScheduleRelative({_js_future_expr(offset)})") == expected
+
+
+def test_app_schedule_relative_near_now_and_past_app():
+    # 現在時刻付近(数秒過去)と、はっきり過去の両方で「再取得待ち」になる
+    assert run_app_js(f'app.fmtAppScheduleRelative("{_iso_offset(-1)}")') == "再取得待ち"
+    assert run_app_js(f'app.fmtAppScheduleRelative("{_iso_offset(-3600)}")') == "再取得待ち"
+
+
+def test_app_schedule_relative_near_now_and_past_compact():
+    assert run_compact_js(f'compact.fmtAppScheduleRelative("{_iso_offset(-1)}")') == "再取得待ち"
+    assert run_compact_js(f'compact.fmtAppScheduleRelative("{_iso_offset(-3600)}")') == "再取得待ち"
+
+
+def test_app_schedule_relative_invalid_app():
+    assert run_app_js("app.fmtAppScheduleRelative(null)") == ""
+    assert run_app_js('app.fmtAppScheduleRelative("not-a-date")') == ""
+
+
+def test_app_schedule_relative_invalid_compact():
+    assert run_compact_js("compact.fmtAppScheduleRelative(null)") == ""
+    assert run_compact_js('compact.fmtAppScheduleRelative("not-a-date")') == ""
+
+
+# app.jsとcompact.jsで意味(出力)が完全に一致することを確認する
+def test_app_schedule_relative_matches_across_both_screens():
+    cases = [_iso_offset(8000), _iso_offset(30), _iso_offset(-1), _iso_offset(-3600)]
+    for iso in cases:
+        app_result = run_app_js(f'app.fmtAppScheduleRelative("{iso}")')
+        compact_result = run_compact_js(f'compact.fmtAppScheduleRelative("{iso}")')
+        assert app_result == compact_result, iso
+    assert run_app_js("app.fmtAppScheduleRelative(null)") == run_compact_js("compact.fmtAppScheduleRelative(null)")
+
+
+# 過去に「まもなく」が出ない
+def test_app_schedule_relative_never_says_mamonaku():
+    for iso in (_iso_offset(-1), _iso_offset(-3600), _iso_offset(-86400)):
+        assert "まもなく" not in run_app_js(f'app.fmtAppScheduleRelative("{iso}")')
+        assert "まもなく" not in run_compact_js(f'compact.fmtAppScheduleRelative("{iso}")')
+
+
+# アプリ予定に「reset時刻超過」/「リセット時刻超過」が出ない
+def test_app_schedule_relative_never_says_reset_overdue():
+    for iso in (_iso_offset(-1), _iso_offset(-3600), _iso_offset(-86400)):
+        app_result = run_app_js(f'app.fmtAppScheduleRelative("{iso}")')
+        compact_result = run_compact_js(f'compact.fmtAppScheduleRelative("{iso}")')
+        assert "時刻超過" not in app_result
+        assert "時刻超過" not in compact_result
+
+
+# --- 統合: 実際の通知HTMLでも「reset時刻超過」「まもなく」が出ないことを確認する ---
+
+
+def test_compact_github_auto_refresh_notice_past_shows_wait_not_overdue_or_soon():
+    html = run_compact_js(
+        f'compact.githubAutoRefreshNoticeHtml({{"refreshing": false, "auto_refresh_pending": true, '
+        f'"next_auto_refresh_at": "{_iso_offset(-120)}", "last_auto_refresh_error": null}})'
+    )
+    assert "再取得待ち" in html
+    assert "まもなく" not in html
+    assert "reset時刻超過" not in html
+
+
+def test_app_github_auto_refresh_notice_past_shows_wait_not_overdue_or_soon():
+    html = run_app_js(
+        f'app.githubAutoRefreshNoticeHtml({{"refreshing": false, "auto_refresh_pending": true, '
+        f'"next_auto_refresh_at": "{_iso_offset(-120)}", "last_auto_refresh_error": null}})'
+    )
+    assert "再取得待ち" in html
+    assert "まもなく" not in html
+    assert "リセット時刻超過" not in html
+
+
+def test_compact_codex_periodic_notice_past_shows_wait_not_overdue():
+    auto = {"auto_refresh_interval_seconds": 600, "next_auto_refresh_at": _iso_offset(-120)}
+    html = run_compact_js(f"compact.codexPeriodicRefreshNoticeHtml({json.dumps(auto)})")
+    assert "再取得待ち" in html
+    assert "reset時刻超過" not in html
+    assert "まもなく" not in html
+
+
+def test_compact_codex_periodic_notice_future_shows_countdown():
+    auto = {"auto_refresh_interval_seconds": 600, "next_auto_refresh_at": _iso_offset(400)}
+    html = run_compact_js(f"compact.codexPeriodicRefreshNoticeHtml({json.dumps(auto)})")
+    assert "あと" in html
+
+
+# --- 修正推奨: fmtDurationJaの入力防御 -------------------------------------------
+
+
+def test_app_duration_defensive_against_bad_input():
+    assert run_app_js("app.fmtDurationJa(-100)") == "1分未満"
+    assert run_app_js("app.fmtDurationJa(NaN)") == "1分未満"
+    assert run_app_js("app.fmtDurationJa(Infinity)") == "1分未満"
+    assert run_app_js("app.fmtDurationJa(3660)") == "1時間 1分"
+
+
+def test_compact_duration_defensive_against_bad_input():
+    assert run_compact_js("compact.fmtDurationJa(-100)") == "1分未満"
+    assert run_compact_js("compact.fmtDurationJa(NaN)") == "1分未満"
+    assert run_compact_js("compact.fmtDurationJa(Infinity)") == "1分未満"
+    assert run_compact_js("compact.fmtDurationJa(3660)") == "1時間 1分"
+
+
 # --- syntax check (再確認) -------------------------------------------------------
 
 

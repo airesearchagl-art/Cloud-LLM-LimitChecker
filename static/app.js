@@ -137,9 +137,12 @@ function fmtGithubDateUtc(value) {
 // 常時監視用の簡易画面(別ファイル)にある同名関数と同一ロジック(両画面で表示結果を揃えるため)。
 // 「h」「m」等の略記は使わず、1分未満/分単位/時間+分/日+時間の4段階で表す。
 // 0になる単位（例: ちょうど1時間）は省略する（「1時間 0分」ではなく「1時間」）。
+// 入力防御: 有限かつ非負の値のみを期間として扱い、それ以外(NaN/Infinity/負値)は0扱いにする
+// (呼び出し側は常に符号判定済みの値を渡す想定だが、誤用時に不正な文字列を出さないための保険)。
 function fmtDurationJa(totalSeconds) {
-  if (totalSeconds < 60) return "1分未満";
-  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? totalSeconds : 0;
+  if (seconds < 60) return "1分未満";
+  const totalMinutes = Math.floor(seconds / 60);
   if (totalMinutes < 60) return `${totalMinutes}分`;
   const totalHours = Math.floor(totalMinutes / 60);
   const remMinutes = totalMinutes % 60;
@@ -167,6 +170,22 @@ function fmtSecondsUntilReset(seconds) {
   if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "不明";
   if (seconds < 0) return "リセット時刻超過";
   return `あと${fmtDurationJa(seconds)}`;
+}
+
+// DOMに触れない純粋関数: アプリ自身の次回スケジュール(GitHubの「アプリの次回取得予定」、
+// Codexの「次回自動更新予定」)専用の相対時間。GitHub/Claude/Codexのresetまでの相対時間
+// (fmtSecondsUntilReset等)とは意味が異なる別概念のため、「リセット時刻超過」は使わない
+// (このスケジュールはGitHub側のreset予定ではなくアプリ自身の未来予定なので、reset語を
+// 混同させない)。同様に、過去の予定時刻を「まもなく」とも表現しない(スケジューラが次回tickで
+// 再取得するのを待っている状態を「再取得待ち」で正確に表す)。不正な日時では相対表示なし
+// (空文字)を返し、呼び出し側は絶対時刻のみにフォールバックする。
+function fmtAppScheduleRelative(isoString) {
+  if (!isoString) return "";
+  const target = new Date(isoString);
+  if (Number.isNaN(target.getTime())) return "";
+  const diffSeconds = Math.floor((target.getTime() - Date.now()) / 1000);
+  if (diffSeconds < 0) return "再取得待ち";
+  return `あと${fmtDurationJa(diffSeconds)}`;
 }
 
 // DOMに触れない純粋関数: dataからHTML文字列を組み立てるだけ。テスト容易性のため分離している。
@@ -199,15 +218,19 @@ function githubResourceCardHtml(resource, stale = false) {
 // DOMに触れない純粋関数: reset後の1回限定自動再取得に関する補助表示。
 // next_auto_refresh_atが過去でも負数のカウントダウンは表示しない。
 // ここでの「次回」はアプリ自身が次にgh api rate_limitを叩くタイミングであり、
-// GitHub側の制限解除予定(reset時刻)ではない — 文言でも両者を混同しない。
+// GitHub側の制限解除予定(reset時刻)ではない — 相対時間はfmtAppScheduleRelative
+// (fmtSecondsUntilResetとは別関数)を使い、文言でも両者を混同しない。
 function githubAutoRefreshNoticeHtml(data) {
   if (!data) return "";
   if (data.refreshing) {
     return `<p class="muted">自動確認中…</p>`;
   }
   if (data.auto_refresh_pending && data.next_auto_refresh_at) {
-    const relative = relativeSuffixFromIso(data.next_auto_refresh_at);
-    return `<p class="muted">reset後に1回だけ、アプリが自動で再取得します。アプリの次回取得予定: ${fmtGithubDate(data.next_auto_refresh_at)}${relative}</p>`;
+    const nextFetchText = fmtAbsoluteWithRelative(
+      fmtGithubDate(data.next_auto_refresh_at),
+      fmtAppScheduleRelative(data.next_auto_refresh_at)
+    );
+    return `<p class="muted">reset後に1回だけ、アプリが自動で再取得します。アプリの次回取得予定: ${nextFetchText}</p>`;
   }
   if (data.last_auto_refresh_error) {
     return `<p class="muted">自動再取得に失敗しました: ${escapeHtml(data.last_auto_refresh_error.user_message || "")}</p>`;
@@ -521,15 +544,6 @@ function fmtMinutesFromSeconds(seconds) {
   return fmtDurationJa(Math.max(seconds, 0));
 }
 
-// DOMに触れない純粋関数: ISO時刻までの相対時間を「（あと...）」/「（まもなく）」の形で返す。
-// 過去や不正な値では空文字を返す(呼び出し側で絶対時刻のみにフォールバックする)。
-function relativeSuffixFromIso(isoString) {
-  if (!isoString) return "";
-  const secondsUntil = Math.floor((new Date(isoString).getTime() - Date.now()) / 1000);
-  if (Number.isNaN(secondsUntil)) return "";
-  return secondsUntil > 0 ? `（${fmtSecondsUntilReset(secondsUntil)}）` : "（まもなく）";
-}
-
 // Codex App Server(account/rateLimits/read)の自動取得状態のみを表示する。
 // 実際のカード表示・fallback判定は監視用ダッシュボード側(resolveCodexDisplay)が担い、
 // ここでは「今どの状態か」を確認できれば十分な最小表示にとどめる。
@@ -554,7 +568,7 @@ function renderCodexRateLimits(data) {
   const autoRefreshEnabledText = data.auto_refresh_enabled ? "有効" : "無効";
   const autoRefreshIntervalText = fmtMinutesFromSeconds(data.auto_refresh_interval_seconds);
   const nextAutoRefreshText = data.next_auto_refresh_at
-    ? `${fmtDate(data.next_auto_refresh_at)}${relativeSuffixFromIso(data.next_auto_refresh_at)}`
+    ? fmtAbsoluteWithRelative(fmtDate(data.next_auto_refresh_at), fmtAppScheduleRelative(data.next_auto_refresh_at))
     : "未定";
   const lastAutoAttemptText = data.last_auto_refresh_attempt_at ? fmtDate(data.last_auto_refresh_attempt_at) : "未実行";
   const lastAutoSuccessText = data.last_auto_refresh_success_at ? fmtDate(data.last_auto_refresh_success_at) : "未成功";
@@ -1115,6 +1129,7 @@ if (typeof module !== "undefined") {
     fmtDurationJa,
     fmtAbsoluteWithRelative,
     suppressCountdownIfStale,
+    fmtAppScheduleRelative,
     fmtSecondsUntilReset,
     githubResourceCardHtml,
     githubRateLimitHtml,
