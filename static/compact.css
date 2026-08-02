@@ -66,6 +66,53 @@ body {
   background: #195762;
 }
 
+#layoutEditToggle[aria-pressed="true"] {
+  background: #2c8298;
+  border-color: #4db3cc;
+}
+
+/* aria-live用の視覚的に隠す領域(読み上げ専用)。他のUI表示を邪魔しない。 */
+.compact-sr-only {
+  border: 0;
+  clip: rect(0, 0, 0, 0);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+/* [hidden]属性が付いている間はauthor側のdisplay指定より優先させ、確実に非表示にする
+   (通常モードでは編集バーがDOMに残っていても画面上に一切出さないため)。 */
+.compact-edit-bar[hidden] {
+  display: none;
+}
+
+.compact-edit-bar {
+  align-items: center;
+  background: #26313a;
+  border-bottom: 1px solid #3a4753;
+  color: #e6edf3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 6px 10px;
+}
+
+.compact-edit-bar-label {
+  color: #cbd5df;
+  font-size: 10px;
+}
+
+/* 編集モード中であることを画面全体でも示す(誤操作防止・現在状態の明示)。 */
+body.compact-layout-editing .compact-main section {
+  outline: 1px dashed #3a4753;
+  outline-offset: 2px;
+}
+
 .compact-main {
   margin: 0 auto;
   max-width: 1600px;
@@ -457,4 +504,118 @@ body {
 .compact-auto-refresh-notice {
   color: #768692;
   font-size: 10px;
+}
+
+/* ============================================================================
+   レイアウトカスタマイズ(編集モード): ドラッグハンドル・上下ボタン・表示切替・
+   セクション操作行。通常モードではこれらの要素自体がDOMに存在しないため、
+   誤操作によるドラッグや意図しないレイアウトは発生しない。
+   ============================================================================ */
+
+.compact-section-edit-bar {
+  align-items: center;
+  background: #1a2933;
+  border: 1px dashed #3a4753;
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 4px 6px;
+}
+
+.compact-card-editable {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.compact-card-editable-hidden {
+  opacity: 0.45;
+}
+
+.compact-card-edit-controls {
+  align-items: center;
+  background: #1a2933;
+  border: 1px dashed #3a4753;
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 3px 6px;
+}
+
+.compact-drag-handle {
+  background: #232d36;
+  border: 1px solid #3a4753;
+  border-radius: 4px;
+  color: #cbd5df;
+  cursor: grab;
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 6px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-drag-handle:active {
+  cursor: grabbing;
+}
+
+.compact-section-drag-handle {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.compact-move-btn {
+  background: #232d36;
+  border: 1px solid #3a4753;
+  border-radius: 4px;
+  color: #cbd5df;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 6px;
+}
+
+.compact-move-btn:hover {
+  background: #2c3944;
+}
+
+.compact-visibility-toggle {
+  align-items: center;
+  color: #cbd5df;
+  display: flex;
+  flex-shrink: 0;
+  font-size: 10px;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.compact-visibility-checkbox {
+  cursor: pointer;
+  height: 13px;
+  width: 13px;
+}
+
+.compact-dragging {
+  opacity: 0.5;
+}
+
+.compact-drag-over {
+  outline: 2px dashed #4db3cc;
+  outline-offset: 2px;
+}
+
+.compact-all-hidden-notice {
+  grid-column: 1 / -1;
+}
+
+/* 通常モードで非表示に設定されたカードはDOMからは取り除かず、display:noneだけで隠す
+   (編集モードへ戻った時に次のfetchサイクルを待たず即座に再表示できるようにするため)。 */
+.compact-card-hidden-mode {
+  display: none;
 }

@@ -12,26 +12,33 @@
       <h1>AI / API Usage Monitor</h1>
       <div class="compact-header-meta">
         <span id="lastRenderedAt" class="compact-last-rendered">最終描画: -</span>
+        <button id="layoutEditToggle" type="button" class="compact-reload" aria-pressed="false">レイアウト編集</button>
         <button id="reloadButton" type="button" class="compact-reload">再読込</button>
       </div>
     </header>
 
-    <main class="compact-main">
-      <section>
+    <div id="layoutEditBar" class="compact-edit-bar" hidden>
+      <span class="compact-edit-bar-label">編集モード中: ドラッグまたは▲▼ボタンで並べ替え、チェックボックスで表示・非表示を切り替えられます。</span>
+      <button id="layoutResetButton" type="button" class="compact-reload">初期配置へ戻す</button>
+    </div>
+    <div id="layoutAnnounce" class="compact-sr-only" aria-live="polite"></div>
+
+    <main class="compact-main" id="mainSections">
+      <section data-section-id="section.dashboard" id="dashboardSection">
         <div id="limitCards" class="compact-grid"></div>
       </section>
 
-      <section>
+      <section data-section-id="section.github" id="githubSection">
         <h2 class="compact-section-title">GitHub API Rate Limit</h2>
         <div id="githubCards" class="compact-github-area"></div>
       </section>
 
-      <section>
+      <section data-section-id="section.claude" id="claudeSection">
         <h2 class="compact-section-title">Claude Code Usage</h2>
         <div id="claudeCodeUsageCards" class="compact-github-area"></div>
       </section>
 
-      <section>
+      <section data-section-id="section.codex" id="codexSection">
         <h2 class="compact-section-title">Codex Usage</h2>
         <div id="codexUsageCards" class="compact-github-area"></div>
       </section>
