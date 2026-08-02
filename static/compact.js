@@ -200,20 +200,30 @@ function limitCardHtml(row) {
 }
 
 // DOMに触れない純粋関数: GitHub/Claude/Codexカード共通の右側RESETブロックを組み立てる。
-// reset絶対時刻と「あと...」の残り時間を、カード下端の小さな補助行ではなく、
-// カード右側の余白を使った独立ブロックとして主要情報の扱いで表示する。
-// relativeTextが空(stale抑制等で「あと...」を出さない場合)は絶対時刻のみを表示する。
+// reset絶対時刻と残り時間を、カード下端の小さな補助行ではなく、カード右側の余白を使った
+// 独立ブロックとして主要情報の扱いで表示する。
+// 左側のquota残量(残り97.9%等)と同じ「残り」ラベルを使うと同一カード内で意味が
+// 衝突するため、右ブロックのラベルは値の種類で出し分ける:
+//   - countdown(relativeTextが「あと」で始まる) -> ラベル「リセットまで」、値は「あと」を除いた期間
+//   - reset時刻超過/不明/未設定(カウントダウンではない事実表記) -> ラベル「状態」、値はそのまま
+//   - relativeTextが空(stale抑制等で何も出さない) -> 絶対時刻のみ表示
 function resetBlockHtml(absoluteText, relativeText) {
-  const remainingHtml = relativeText
-    ? `
-      <div class="compact-reset-remaining-label">残り</div>
-      <div class="compact-reset-remaining-value">${escapeHtml(relativeText)}</div>`
-    : "";
+  if (!relativeText) {
+    return `
+      <div class="compact-reset-block">
+        <div class="compact-reset-label">RESET</div>
+        <div class="compact-reset-absolute">${escapeHtml(absoluteText)}</div>
+      </div>`;
+  }
+  const isCountdown = relativeText.startsWith("あと");
+  const remainingLabel = isCountdown ? "リセットまで" : "状態";
+  const remainingValue = isCountdown ? relativeText.slice("あと".length) : relativeText;
   return `
     <div class="compact-reset-block">
       <div class="compact-reset-label">RESET</div>
       <div class="compact-reset-absolute">${escapeHtml(absoluteText)}</div>
-      ${remainingHtml}
+      <div class="compact-reset-remaining-label">${escapeHtml(remainingLabel)}</div>
+      <div class="compact-reset-remaining-value">${escapeHtml(remainingValue)}</div>
     </div>`;
 }
 
@@ -470,8 +480,10 @@ function codexUsageWindowHtml(label, window, badgeLabel = "手動確認値", sta
   const resetExceeded = rawRelative === "reset時刻超過";
   const relativeText = suppressCountdownIfStale(rawRelative, stale);
   const absoluteText = fmtDateOrUnknown(window.resets_at);
+  // reset時刻超過はRESETブロック(状態: reset時刻超過)側にのみ表示し、ここでは重複させない。
+  // percentage/meterは引き続き非表示にする(空文字を返すだけで、代替テキストは出さない)。
   const leftBlock = resetExceeded
-    ? `<div class="compact-no-limit">reset時刻超過</div>`
+    ? ""
     : (() => {
         const width = Math.min(Math.max(window.used_percentage, 0), 100);
         return `

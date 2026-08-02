@@ -1,6 +1,15 @@
 """Tests for the /compact GitHub/Claude/Codex card layout refinement: a
-right-side RESET block (absolute time + a prominent "残り" duration) replacing
-the old bottom meta-row, and the height/overflow behavior that comes with it.
+right-side RESET block (absolute time + a prominent countdown/status value)
+replacing the old bottom meta-row, and the height/overflow behavior that
+comes with it.
+
+The RESET block's remaining-value label is chosen by content, not fixed to
+"残り" (that label is already used by the left-side quota percentage, and
+reusing it for the time-remaining value on the right made the two collide
+within the same card):
+  - countdown ("あと..." text)              -> label "リセットまで", value with "あと" stripped
+  - reset時刻超過 / 不明 / 未設定 (a fact, not a countdown) -> label "状態", value as-is
+  - stale-suppressed (empty relativeText)    -> no remaining row at all, absolute time only
 
 Scope: presentation only (static/compact.js + static/compact.css). No fetch
 logic, domain judgment, stale rules, or app-schedule/reset-schedule
@@ -54,13 +63,14 @@ def window(**overrides):
 # --- resetBlockHtml: shared right-side block pure function ----------------------
 
 
-def test_reset_block_shows_absolute_and_remaining_when_relative_present():
+def test_reset_block_countdown_uses_dedicated_label_and_strips_ato():
     html = run_compact_js('compact.resetBlockHtml("2999/1/1 9:00:00", "あと2時間 15分")')
     assert "compact-reset-block" in html
     assert "RESET" in html
     assert "2999/1/1 9:00:00" in html
-    assert "残り" in html
-    assert "あと2時間 15分" in html
+    assert "リセットまで" in html
+    assert "2時間 15分" in html
+    assert "あと2時間" not in html
     assert "compact-reset-remaining-value" in html
 
 
@@ -68,13 +78,22 @@ def test_reset_block_omits_remaining_row_when_relative_empty():
     html = run_compact_js('compact.resetBlockHtml("2999/1/1 9:00:00", "")')
     assert "2999/1/1 9:00:00" in html
     assert "compact-reset-remaining-value" not in html
-    assert "残り" not in html
+    assert "リセットまで" not in html
+    assert "状態" not in html
 
 
-def test_reset_block_shows_overdue_text_as_remaining_value():
+def test_reset_block_overdue_uses_status_label():
     html = run_compact_js('compact.resetBlockHtml("2000/1/1 9:00:00", "reset時刻超過")')
     assert "compact-reset-remaining-value" in html
+    assert "状態" in html
     assert "reset時刻超過" in html
+    assert "リセットまで" not in html
+
+
+def test_reset_block_unknown_uses_status_label():
+    html = run_compact_js('compact.resetBlockHtml("不明", "不明")')
+    assert "状態" in html
+    assert "リセットまで" not in html
 
 
 # --- Layout structure present on all three provider cards -----------------------
@@ -130,29 +149,83 @@ def test_codex_unentered_window_has_no_split_layout():
     assert "未入力" in html
 
 
-# --- fresh / stale / overdue behavior preserved with the new layout -------------
+# --- 修正必須1: quota残量の「残り」とreset側ラベルを区別する(GitHub/Claude/Codex共通) ---
 
 
-def test_github_fresh_shows_prominent_remaining_value():
+def test_github_fresh_distinguishes_quota_remaining_from_reset_countdown():
     html = run_compact_js(f"compact.githubResourceCardHtml({json.dumps(resource('Normal'))}, false)")
-    assert "compact-reset-remaining-value" in html
-    assert "あと2時間 15分" in html
+    # 左: quota残量は従来どおり「残り 98%」
+    assert "compact-percent-label\">残り<" in html
+    # 右: reset側は「リセットまで」であり、あとプレフィックスを含まない値
+    assert "リセットまで" in html
+    assert "compact-reset-remaining-value\">2時間 15分<" in html
+    assert "compact-reset-remaining-value\">あと2時間" not in html
 
 
-def test_github_stale_shows_absolute_only_no_remaining_block():
+def test_claude_fresh_distinguishes_quota_remaining_from_reset_countdown():
+    html = run_compact_js(f'compact.claudeUsageWindowHtml("Claude 5時間枠", {json.dumps(window())}, false)')
+    assert "compact-percent-label\">残り<" in html
+    assert "リセットまで" in html
+
+
+def test_codex_fresh_distinguishes_quota_remaining_from_reset_countdown():
+    html = run_compact_js(
+        f'compact.codexUsageWindowHtml("Codex 5時間枠", {json.dumps(window())}, "自動取得", false)'
+    )
+    assert "compact-percent-label\">残り<" in html
+    assert "リセットまで" in html
+
+
+def test_github_stale_shows_absolute_only_no_remaining_row():
     html = run_compact_js(f"compact.githubResourceCardHtml({json.dumps(resource('Normal'))}, true)")
     assert "compact-reset-remaining-value" not in html
+    assert "リセットまで" not in html
+    assert "状態" not in html
     assert "あと" not in html
     assert "2999" in html  # 絶対時刻は維持される
 
 
-def test_codex_overdue_hides_percent_but_reset_block_shows_overdue_text():
+def test_claude_stale_shows_absolute_only_no_remaining_row():
+    html = run_compact_js(f'compact.claudeUsageWindowHtml("Claude 5時間枠", {json.dumps(window())}, true)')
+    assert "compact-reset-remaining-value" not in html
+    assert "リセットまで" not in html
+    assert "2999" in html
+
+
+def test_codex_stale_shows_absolute_only_no_remaining_row():
+    html = run_compact_js(
+        f'compact.codexUsageWindowHtml("Codex 5時間枠", {json.dumps(window())}, "自動取得", true)'
+    )
+    assert "compact-reset-remaining-value" not in html
+    assert "リセットまで" not in html
+    assert "2999" in html
+
+
+def test_github_reset_overdue_uses_status_label_not_countdown_label():
+    overdue = resource("Reset overdue", seconds_until_reset=-100)
+    html = run_compact_js(f"compact.githubResourceCardHtml({json.dumps(overdue)}, false)")
+    assert "状態" in html
+    assert "reset時刻超過" in html
+    assert "リセットまで" not in html
+
+
+# --- 修正必須2: Codex reset超過で「reset時刻超過」が1回だけ表示される -------------
+
+
+def test_codex_overdue_reset_time_exceeded_appears_exactly_once():
     overdue_window = window(resets_at="2000-01-01T00:00:00+00:00")
     html = run_compact_js(f'compact.codexUsageWindowHtml("Codex 5時間枠", {json.dumps(overdue_window)})')
+    assert html.count("reset時刻超過") == 1
     assert "compact-percent-value" not in html
     assert "40%" not in html
-    assert "reset時刻超過" in html
     assert "compact-reset-remaining-value" in html
+    assert "状態" in html
+
+
+def test_codex_overdue_left_column_has_no_duplicate_text():
+    overdue_window = window(resets_at="2000-01-01T00:00:00+00:00")
+    html = run_compact_js(f'compact.codexUsageWindowHtml("Codex 5時間枠", {json.dumps(overdue_window)})')
+    assert "compact-no-limit" not in html
 
 
 # --- RATE LIMITEDバナー等は今回の対象外で、影響を受けない ------------------------
