@@ -79,7 +79,7 @@ Windows環境では以下に保存されます(このリポジトリの外、`~/
 ### 確認できた事実
 
 - 上記の`statusLine`ブリッジは、CLI(ローカルで動くClaude Code本体)からのpush呼び出しにのみ反応します。現在のセッションでも、CLIを実行した直後にキャッシュのmtimeが更新されることを確認しています。
-- Claude Codeの公式ドキュメント(`code.claude.com/docs/en/claude-code-on-the-web`、`code.claude.com/docs/en/sandbox-environments`)によれば、Claude Code on the webの各セッションはAnthropic管理の分離された仮想マシン上で動作し、ローカルマシンのファイルシステムへはアクセスできません。認証情報もプロキシ経由で扱われ、サンドボックス内には入らないとされています。同期されるのはgit経由のコードとブランチのみで、使用率データをローカルへ同期する公式経路は、今回調査したドキュメント上には見つかりませんでした。
+- Claude Codeの公式ドキュメント(`code.claude.com/docs/en/claude-code-on-the-web`、`code.claude.com/docs/en/sandbox-environments`)によれば、Claude Code on the webの各セッションはAnthropic管理の分離された仮想マシン上で動作し、ローカルマシンのファイルシステムへはアクセスできません。認証情報もプロキシ経由で扱われ、サンドボックス内には入らないとされています。コードの持ち込み・持ち出しについては、GitHubリポジトリからのclone、およびGitHubに接続していないローカルRepositoryをbundleとしてアップロードする経路が公式に提供されています。ただし、これらはいずれもコード・ブランチの同期経路であり、Cloud session側からこのPCのlocal usage cache(`claude-code-usage.json`)を直接更新できる公式経路は、今回調査したドキュメント上には見つかりませんでした。
 - このlocal bridge構成では、CloudからのCode session実行結果がlocalの`claude-code-usage.json`キャッシュへ反映されることを確認できませんでした。これは現在のブリッジがCLIのstatusLine push呼び出しにのみ依存しているためで、Cloud session側から見た「更新できない理由」を断定するものではありません。
 - ユーザーからは、「Desktop CloudでのCode使用が、1〜2日前まではこのダッシュボードのClaude使用率へ反映されているように見えていた」という観測が報告されています。この観測自体は事実として記録しますが、当時どの経路で反映されていたのか(例: 過去に異なるstatusLine設定を使っていた、Localで作業していた期間があった、など)は今回のリポジトリ内調査だけでは確認できておらず、未確定です。
 
