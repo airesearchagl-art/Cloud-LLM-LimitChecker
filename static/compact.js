@@ -457,12 +457,17 @@ function claudeUsageWindowHtml(label, window, stale = false, cardId = null, badg
 // 常にどちらか一方のsnapshot全体だけを選ぶ。
 // 規則: 有効な(available=trueの)snapshotだけを候補にし、observed_atが新しい方を選ぶ。
 // 同時刻ならCLI自動を優先する。無効(invalid_cache)なsnapshotは候補にしない。
+// manual側はavailable=trueに加えて両window(five_hour・seven_day)が揃っていることも確認する —
+// サーバー側(claude_desktop_cloud_usage_cache.validate_cache_record)は既に両window必須で
+// 検証しているが、ここでも同じ不変条件を守ることで、片方だけのmanual snapshotが完全なauto
+// snapshotの片方の枠を(表示上)覆い隠す事態を防ぐ。auto側はstatusLine由来で片方だけの観測が
+// 正当にあり得るため、この追加チェックはmanualにのみ課す(autoの片方欠落許容は変更しない)。
 // stale判定は各snapshot自身が既に計算済みの値(load_snapshotのSTALE_THRESHOLD_SECONDS)を
 // そのまま使う(ここで独自の閾値判定はしない)。CLIが後で新しいobserved_atを書けば、
 // このresolve関数が自動的に自動snapshotへ選び直す(手動値へ固定されたままにはならない)。
 function resolveClaudeCodeUsageDisplay(auto, manual) {
   const autoValid = !!(auto && auto.available);
-  const manualValid = !!(manual && manual.available);
+  const manualValid = !!(manual && manual.available && manual.five_hour && manual.seven_day);
 
   let winner = null;
   if (autoValid && manualValid) {

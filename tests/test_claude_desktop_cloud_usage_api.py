@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.claude_desktop_cloud_usage_cache import (
+    MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS,
     STALE_THRESHOLD_SECONDS,
     CacheValidationError,
     load_snapshot,
@@ -142,6 +143,18 @@ MALFORMED_CACHE_CASES = [
     ("source_mismatch", _base_record(source="something_else")),
     # a value from the CLI-auto cache's source string must never validate here
     ("source_is_cli_auto_source", _base_record(source="claude_code_statusline")),
+    (
+        "observed_at_far_future",
+        _base_record(
+            observed_at=(NOW + timedelta(seconds=MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS + 3600)).isoformat()
+        ),
+    ),
+    # Unlike the CLI-auto cache, a manual snapshot must always be self-contained —
+    # a missing window is rejected outright rather than treated as "not observed
+    # for that window" (see the both-windows-required comment in
+    # app/claude_desktop_cloud_usage_cache.py::validate_cache_record).
+    ("five_hour_missing", _base_record(five_hour=None)),
+    ("seven_day_missing", _base_record(seven_day=None)),
 ]
 MALFORMED_CACHE_IDS = [case[0] for case in MALFORMED_CACHE_CASES]
 
@@ -174,21 +187,41 @@ def test_load_snapshot_normalizes_aware_jst_observed_at_to_utc(tmp_path: Path) -
     assert snapshot["observed_at"] == NOW.isoformat()
 
 
-def test_load_snapshot_allows_one_window_missing(tmp_path: Path) -> None:
+# Both windows are required for every manual snapshot (see the both-windows-required
+# comment in app/claude_desktop_cloud_usage_cache.py::validate_cache_record) — a
+# partial manual snapshot must be treated as invalid_cache, not as a legitimately
+# partial observation the way the CLI-auto cache treats a missing window.
+def test_load_snapshot_rejects_seven_day_missing(tmp_path: Path) -> None:
     record = _base_record(seven_day=None)
     cache_path = tmp_path / "cache.json"
     cache_path.write_text(json.dumps(record), encoding="utf-8")
 
     snapshot = load_snapshot(now=NOW, path=cache_path)
 
-    assert snapshot["available"] is True
-    assert snapshot["status"] == "ok"
-    assert snapshot["five_hour"] is not None
+    assert snapshot["available"] is False
+    assert snapshot["status"] == "invalid_cache"
+    assert snapshot["five_hour"] is None
     assert snapshot["seven_day"] is None
 
 
-def test_load_snapshot_allows_only_seven_day_window(tmp_path: Path) -> None:
+def test_load_snapshot_rejects_five_hour_missing(tmp_path: Path) -> None:
     record = _base_record(five_hour=None)
+    cache_path = tmp_path / "cache.json"
+    cache_path.write_text(json.dumps(record), encoding="utf-8")
+
+    snapshot = load_snapshot(now=NOW, path=cache_path)
+
+    assert snapshot["available"] is False
+    assert snapshot["status"] == "invalid_cache"
+    assert snapshot["five_hour"] is None
+    assert snapshot["seven_day"] is None
+
+
+# observed_atが許容skew内の未来なら拒否しない(「observed_at_far_future」の境界を固定する)
+def test_load_snapshot_allows_observed_at_within_skew_allowance(tmp_path: Path) -> None:
+    record = _base_record(
+        observed_at=(NOW + timedelta(seconds=MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS - 1)).isoformat()
+    )
     cache_path = tmp_path / "cache.json"
     cache_path.write_text(json.dumps(record), encoding="utf-8")
 
@@ -196,8 +229,19 @@ def test_load_snapshot_allows_only_seven_day_window(tmp_path: Path) -> None:
 
     assert snapshot["available"] is True
     assert snapshot["status"] == "ok"
-    assert snapshot["five_hour"] is None
-    assert snapshot["seven_day"] is not None
+
+
+def test_load_snapshot_rejects_observed_at_far_future(tmp_path: Path) -> None:
+    record = _base_record(
+        observed_at=(NOW + timedelta(seconds=MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS + 3600)).isoformat()
+    )
+    cache_path = tmp_path / "cache.json"
+    cache_path.write_text(json.dumps(record), encoding="utf-8")
+
+    snapshot = load_snapshot(now=NOW, path=cache_path)
+
+    assert snapshot["available"] is False
+    assert snapshot["status"] == "invalid_cache"
 
 
 def test_validate_cache_record_normal_case_succeeds() -> None:

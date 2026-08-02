@@ -193,15 +193,55 @@ def test_resolve_claude_usage_display_partial_window_auto_passes_through() -> No
     assert result["seven_day"] is None
 
 
-def test_resolve_claude_usage_display_never_mixes_windows_across_snapshots() -> None:
-    # Even though manual is newer, the resolver must select manual's snapshot as a
-    # whole and never take e.g. five_hour from auto and seven_day from manual.
+def test_resolve_claude_usage_display_partial_manual_is_treated_as_invalid_even_if_newer() -> None:
+    # A partial manual snapshot (missing seven_day) must never win over a complete
+    # auto snapshot just because it's newer — PUT /api/claude-code-usage/manual and
+    # the cache validator both reject partial saves now, but this locks in the
+    # defense-in-depth check in resolveClaudeCodeUsageDisplay itself: a manual
+    # snapshot missing either window is never treated as `available` for selection
+    # purposes, so the complete, older auto snapshot is kept instead of silently
+    # hiding its seven_day window behind an incomplete "newer" manual one.
     auto = {**AUTO_FRESH, "observed_at": "2026-01-01T09:00:00+00:00"}
     manual = {**MANUAL_FRESH, "observed_at": "2026-01-01T12:00:00+00:00", "seven_day": None}
     result = run_compact_js(f"compact.resolveClaudeCodeUsageDisplay({json.dumps(auto)}, {json.dumps(manual)})")
+    assert result["source"] == "claude_code_statusline"
+    assert result["five_hour"]["used_percentage"] == 42.0
+    assert result["seven_day"] is not None
+
+
+def test_resolve_claude_usage_display_partial_manual_only_is_not_observed() -> None:
+    manual = {**MANUAL_FRESH, "five_hour": None}
+    result = run_compact_js(
+        f"compact.resolveClaudeCodeUsageDisplay({json.dumps(NOT_OBSERVED)}, {json.dumps(manual)})"
+    )
+    assert result["available"] is False
+    assert result["source"] is None
+    assert result["status"] == "not_observed"
+
+
+def test_resolve_claude_usage_display_never_mixes_windows_across_complete_snapshots() -> None:
+    # Even though manual is newer, the resolver must select manual's complete
+    # snapshot as a whole and never take e.g. five_hour from auto and seven_day
+    # from manual.
+    auto = {**AUTO_FRESH, "observed_at": "2026-01-01T09:00:00+00:00"}
+    manual = {**MANUAL_FRESH, "observed_at": "2026-01-01T12:00:00+00:00"}
+    result = run_compact_js(f"compact.resolveClaudeCodeUsageDisplay({json.dumps(auto)}, {json.dumps(manual)})")
     assert result["source"] == "claude_desktop_cloud_manual"
     assert result["five_hour"]["used_percentage"] == 30.0
-    assert result["seven_day"] is None
+    assert result["seven_day"]["used_percentage"] == 10.0
+
+
+def test_resolve_claude_usage_display_future_rejected_manual_falls_back_to_auto() -> None:
+    # A manual cache file with an observed_at far in the future is rejected by
+    # validate_cache_record before it ever reaches this resolver — the API surfaces
+    # it as available=False (mirroring what GET /api/claude-code-usage/manual would
+    # return for such a file). The resolver must fall back to a valid auto snapshot.
+    future_rejected_manual = {"available": False, "status": "invalid_cache"}
+    result = run_compact_js(
+        f"compact.resolveClaudeCodeUsageDisplay({json.dumps(AUTO_FRESH)}, {json.dumps(future_rejected_manual)})"
+    )
+    assert result["source"] == "claude_code_statusline"
+    assert result["available"] is True
 
 
 # ---------------------------------------------------------------------------

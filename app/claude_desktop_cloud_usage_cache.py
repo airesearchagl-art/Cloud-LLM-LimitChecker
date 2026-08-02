@@ -38,6 +38,14 @@ SOURCE_NAME = "claude_desktop_cloud_manual"
 # matches the same rationale used for Codex's manual snapshot cache.
 STALE_THRESHOLD_SECONDS = 24 * 60 * 60
 
+# `observed_at` is supposed to be "roughly now" at write time. A little future
+# skew is tolerated (clock drift between whatever process wrote the cache and
+# whatever process reads it); anything further out is treated as corrupt data
+# rather than displayed as a fresh-looking future observation that would keep
+# outranking a genuinely current auto snapshot in resolveClaudeCodeUsageDisplay's
+# newest-observed_at-wins selection (see static/compact.js).
+MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS = 5 * 60
+
 # used_percentage + remaining_percentage must sum to ~100; this only allows for
 # float rounding, not for genuinely inconsistent data.
 PERCENTAGE_SUM_TOLERANCE = 0.5
@@ -137,13 +145,27 @@ def validate_cache_record(record: object, *, now: datetime) -> dict:
     observed_at = _parse_aware_utc_datetime(record.get("observed_at"))
     if observed_at is None:
         raise CacheValidationError("observed_at is not a timezone-aware ISO datetime")
+    if (observed_at - now).total_seconds() > MAX_OBSERVED_AT_FUTURE_SKEW_SECONDS:
+        raise CacheValidationError("observed_at is too far in the future")
+
+    five_hour = _validate_window(record.get("five_hour"))
+    seven_day = _validate_window(record.get("seven_day"))
+    # Unlike the CLI-auto cache (where either window may legitimately be
+    # missing — statusLine's own `rate_limits` payload can omit one), every
+    # manual snapshot must be self-contained: resolveClaudeCodeUsageDisplay
+    # (static/compact.js) picks auto or manual as a whole unit by newest
+    # observed_at, never mixing windows across the two sources. A partial
+    # manual snapshot that's newer than a complete auto snapshot would
+    # otherwise silently hide a window the user could previously see.
+    if five_hour is None or seven_day is None:
+        raise CacheValidationError("both five_hour and seven_day are required")
 
     return {
         "schema_version": SCHEMA_VERSION,
         "source": SOURCE_NAME,
         "observed_at": observed_at.isoformat(),
-        "five_hour": _validate_window(record.get("five_hour")),
-        "seven_day": _validate_window(record.get("seven_day")),
+        "five_hour": five_hour,
+        "seven_day": seven_day,
     }
 
 
