@@ -111,6 +111,44 @@
       </section>
 
       <section>
+        <div class="panel" id="claudeDesktopCloudUsagePanel">
+          <div class="panel-heading">
+            <h2>Claude Desktop Cloud 使用率（手動入力）</h2>
+            <span id="claudeDesktopCloudUsageLastConfirmed" class="muted">最終手動確認: -</span>
+          </div>
+          <p class="form-note">
+            Claude DesktopのCodeタブでEnvironmentがCloudの場合、そのセッションはAnthropic管理の仮想マシン上で動作し、このPCのローカルファイルへ直接アクセスできません（詳細は docs/claude-code-usage-bridge.md）。CLI（statusLine）の自動取得は別経路として維持されます。ここではDesktopの公式usage画面で確認した値を入力してください。自動取得ではありません。5時間枠・7日枠の両方を入力してください（表示は取得元ごと丸ごと切り替わるため、片方だけの保存はできません）。
+          </p>
+          <form id="claudeDesktopCloudUsageForm" class="codex-usage-form">
+            <fieldset class="codex-usage-fieldset">
+              <legend>5時間枠</legend>
+              <label>
+                <span>残り%</span>
+                <input id="claudeDesktopCloudFiveHourRemaining" name="five_hour_remaining_percentage" type="number" step="0.01" min="0" max="100" placeholder="例: 60" required />
+              </label>
+              <label>
+                <span>reset日時（ローカル時刻）</span>
+                <input id="claudeDesktopCloudFiveHourResetsAt" name="five_hour_resets_at" type="datetime-local" required />
+              </label>
+            </fieldset>
+            <fieldset class="codex-usage-fieldset">
+              <legend>7日枠</legend>
+              <label>
+                <span>残り%</span>
+                <input id="claudeDesktopCloudSevenDayRemaining" name="seven_day_remaining_percentage" type="number" step="0.01" min="0" max="100" placeholder="例: 80" required />
+              </label>
+              <label>
+                <span>reset日時（ローカル時刻）</span>
+                <input id="claudeDesktopCloudSevenDayResetsAt" name="seven_day_resets_at" type="datetime-local" required />
+              </label>
+            </fieldset>
+            <button id="claudeDesktopCloudUsageSubmit" type="submit">Claude Desktop Cloud 使用率を保存</button>
+            <div id="claudeDesktopCloudUsageResult" class="codex-usage-result-slot" aria-live="polite"></div>
+          </form>
+        </div>
+      </section>
+
+      <section>
         <div class="panel" id="codexRateLimitsPanel">
           <div class="panel-heading">
             <h2>Codex Usage（自動取得）</h2>

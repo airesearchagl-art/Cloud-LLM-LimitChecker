@@ -4,6 +4,7 @@ const state = {
   dashboard: [],
   github: null,
   claudeCodeUsage: null,
+  claudeDesktopCloudUsage: null,
   codexRateLimits: null,
   codexUsage: null,
 };
@@ -418,12 +419,15 @@ function githubSectionHtml(data) {
 // cardId(例: "claude.five_hour")はレイアウトカスタマイズ用のstable ID。表示文言(label)や
 // DOM位置から推測せず、呼び出し元(claudeCodeSectionHtml)が明示的に渡す。省略時(null)は
 // data-card-id属性を付与しない(既存呼び出し・既存テストとの後方互換のため末尾の省略可能引数とする)。
-function claudeUsageWindowHtml(label, window, stale = false, cardId = null) {
+// badgeLabel(例:「CLI自動取得」「Desktop Cloud 手動確認値」)はresolveClaudeCodeUsageDisplayが
+// 決めたsource_labelをそのまま渡すだけで、ここではCLI/manualの判定は一切行わない。
+function claudeUsageWindowHtml(label, window, stale = false, cardId = null, badgeLabel = null) {
   const cardIdAttr = cardId ? ` data-card-id="${escapeHtml(cardId)}"` : "";
+  const badgeHtml = badgeLabel ? `<span class="compact-source-badge">${escapeHtml(badgeLabel)}</span>` : "";
   if (!window) {
     return `
       <article class="compact-card compact-provider-claude"${cardIdAttr}>
-        <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
+        <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span>${badgeHtml}</div>
         <div class="compact-no-limit">未観測</div>
       </article>`;
   }
@@ -432,7 +436,7 @@ function claudeUsageWindowHtml(label, window, stale = false, cardId = null) {
   const absoluteText = fmtDateOrUnknown(window.resets_at);
   return `
     <article class="compact-card compact-provider-claude"${cardIdAttr}>
-      <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span></div>
+      <div class="compact-card-head"><span class="compact-service-name">${escapeHtml(label)}</span>${badgeHtml}</div>
       <div class="compact-card-body">
         <div class="compact-card-left">
           <div class="compact-percent-row">
@@ -447,9 +451,84 @@ function claudeUsageWindowHtml(label, window, stale = false, cardId = null) {
     </article>`;
 }
 
-// DOMに触れない純粋関数: GET /api/claude-code-usage のレスポンスからセクションHTMLを組み立てる。
-// statusLineはpush型のため、staleは「取得不可」ではなく「最終観測値が古い」という意味で表示する。
-// providerの識別は色だけに依存させず、カード内ラベルへ"Claude "を明示する。
+// DOMに触れない純粋関数: CLI statusLine自動cache(GET /api/claude-code-usage)とDesktop Cloud
+// 手動snapshot(GET /api/claude-code-usage/manual)から、表示すべきsource・データ・バッジ文言を
+// 決定する。windowを個別に混ぜない(five_hourは自動、seven_dayは手動、のような合成をしない) —
+// 常にどちらか一方のsnapshot全体だけを選ぶ。
+// 規則: 有効な(available=trueの)snapshotだけを候補にし、observed_atが新しい方を選ぶ。
+// 同時刻ならCLI自動を優先する。無効(invalid_cache)なsnapshotは候補にしない。
+// manual側はavailable=trueに加えて両window(five_hour・seven_day)が揃っていることも確認する —
+// サーバー側(claude_desktop_cloud_usage_cache.validate_cache_record)は既に両window必須で
+// 検証しているが、ここでも同じ不変条件を守ることで、片方だけのmanual snapshotが完全なauto
+// snapshotの片方の枠を(表示上)覆い隠す事態を防ぐ。auto側はstatusLine由来で片方だけの観測が
+// 正当にあり得るため、この追加チェックはmanualにのみ課す(autoの片方欠落許容は変更しない)。
+// stale判定は各snapshot自身が既に計算済みの値(load_snapshotのSTALE_THRESHOLD_SECONDS)を
+// そのまま使う(ここで独自の閾値判定はしない)。CLIが後で新しいobserved_atを書けば、
+// このresolve関数が自動的に自動snapshotへ選び直す(手動値へ固定されたままにはならない)。
+function resolveClaudeCodeUsageDisplay(auto, manual) {
+  const autoValid = !!(auto && auto.available);
+  const manualValid = !!(manual && manual.available && manual.five_hour && manual.seven_day);
+
+  let winner = null;
+  if (autoValid && manualValid) {
+    const autoTime = new Date(auto.observed_at).getTime();
+    const manualTime = new Date(manual.observed_at).getTime();
+    // 同時刻(またはどちらかの日時が不正でNaN比較になった場合)はCLI自動を優先する。
+    winner = manualTime > autoTime ? "manual" : "auto";
+  } else if (autoValid) {
+    winner = "auto";
+  } else if (manualValid) {
+    winner = "manual";
+  }
+
+  if (winner === "auto") {
+    return {
+      available: true,
+      source: "claude_code_statusline",
+      // source_labelは常に取得元(CLI自動取得)を表す。staleかどうかはdata.staleが別途持ち、
+      // 「最終観測値(古い可能性があります)」はclaudeCodeSectionHtml側でstale専用の表示として
+      // source_labelとは別に一度だけ組み立てる(取得元とstale表記を同じ語で二重に出さないため)。
+      source_label: "CLI自動取得",
+      stale: auto.stale,
+      observed_at: auto.observed_at,
+      five_hour: auto.five_hour,
+      seven_day: auto.seven_day,
+      status: null,
+    };
+  }
+  if (winner === "manual") {
+    return {
+      available: true,
+      source: "claude_desktop_cloud_manual",
+      source_label: "Desktop Cloud 手動確認値",
+      stale: manual.stale,
+      observed_at: manual.observed_at,
+      five_hour: manual.five_hour,
+      seven_day: manual.seven_day,
+      status: null,
+    };
+  }
+
+  const invalid = (auto && auto.status === "invalid_cache") || (manual && manual.status === "invalid_cache");
+  return {
+    available: false,
+    source: null,
+    source_label: null,
+    stale: false,
+    observed_at: null,
+    five_hour: null,
+    seven_day: null,
+    status: invalid ? "invalid_cache" : "not_observed",
+  };
+}
+
+// DOMに触れない純粋関数: resolveClaudeCodeUsageDisplayが選んだ1つのsnapshotからセクションHTMLを
+// 組み立てる。statusLineはpush型・Desktop Cloud手動値は確認型のため、staleは「取得不可」ではなく
+// 「最終観測値が古い」という意味で表示する。providerの識別は色だけに依存させず、
+// カード内ラベルへ"Claude "を明示する。data.source_labelが無い(=旧呼び出し・テスト互換)場合は
+// バッジ自体を表示しない。source_label(取得元: CLI自動取得/Desktop Cloud 手動確認値)とstale表記
+// (最終観測値(古い可能性があります))は常に別々に組み立てる — stale時でも取得元が分かるようにしつつ、
+// 同じ語("最終観測値")を二重に表示しないため。
 function claudeCodeSectionHtml(data) {
   if (!data || !data.available) {
     const message = data && data.status === "invalid_cache" ? "取得不可" : "Claude Code実行後に取得";
@@ -457,14 +536,14 @@ function claudeCodeSectionHtml(data) {
   }
 
   const staleNoticeHtml = data.stale
-    ? `<div class="compact-stale-notice">最終観測値(古い可能性があります)</div>`
+    ? `<div class="compact-stale-notice">${data.source_label ? `${escapeHtml(data.source_label)}・` : ""}最終観測値(古い可能性があります)</div>`
     : "";
 
   return `
     ${staleNoticeHtml}
     <div class="compact-github-grid-inner">
-      ${claudeUsageWindowHtml("Claude 5時間枠", data.five_hour, data.stale, "claude.five_hour")}
-      ${claudeUsageWindowHtml("Claude 7日枠", data.seven_day, data.stale, "claude.seven_day")}
+      ${claudeUsageWindowHtml("Claude 5時間枠", data.five_hour, data.stale, "claude.five_hour", data.source_label)}
+      ${claudeUsageWindowHtml("Claude 7日枠", data.seven_day, data.stale, "claude.seven_day", data.source_label)}
     </div>
     <div class="compact-stale-notice">最終観測: ${fmtDateOrUnknown(data.observed_at)}</div>
   `;
@@ -1149,34 +1228,41 @@ function renderGithubSection(data) {
   document.querySelector("#githubCards").innerHTML = githubSectionHtml(data);
 }
 
-function renderClaudeCodeUsage(data) {
-  document.querySelector("#claudeCodeUsageCards").innerHTML = claudeCodeSectionHtml(data);
+// 自動(CLI statusLine)snapshotとDesktop Cloud手動snapshotを、resolveClaudeCodeUsageDisplayで
+// 1つに絞ってから描画する。windowをまたいだ混合はresolve関数側で行われないため、ここでも行わない。
+function renderClaudeCodeUsage(auto, manual) {
+  const resolved = resolveClaudeCodeUsageDisplay(auto, manual);
+  document.querySelector("#claudeCodeUsageCards").innerHTML = claudeCodeSectionHtml(resolved);
 }
 
 function renderCodexUsage(auto, manual) {
   document.querySelector("#codexUsageCards").innerHTML = codexUsageSectionHtml(auto, manual);
 }
 
-// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・/api/codex-rate-limits・
-// /api/codex-usage はいずれも保存済みの値を返すだけで、gh api rate_limitやClaude Code/Codex App Server
-// の起動などの外部コマンド/APIをここから直接実行することはない(更新系リクエストはここから一切送信しない)。
+// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・
+// /api/claude-code-usage/manual・/api/codex-rate-limits・/api/codex-usage はいずれも保存済みの値を
+// 返すだけで、gh api rate_limitやClaude Code/Codex App Serverの起動などの外部コマンド/APIを
+// ここから直接実行することはない(更新系リクエストはここから一切送信しない)。
 async function loadCompact() {
   try {
-    const [dashboard, github, claudeCodeUsage, codexRateLimits, codexUsage] = await Promise.all([
-      fetchJson("/api/dashboard"),
-      fetchJson("/api/github-rate-limit"),
-      fetchJson("/api/claude-code-usage"),
-      fetchJson("/api/codex-rate-limits"),
-      fetchJson("/api/codex-usage"),
-    ]);
+    const [dashboard, github, claudeCodeUsage, claudeDesktopCloudUsage, codexRateLimits, codexUsage] =
+      await Promise.all([
+        fetchJson("/api/dashboard"),
+        fetchJson("/api/github-rate-limit"),
+        fetchJson("/api/claude-code-usage"),
+        fetchJson("/api/claude-code-usage/manual"),
+        fetchJson("/api/codex-rate-limits"),
+        fetchJson("/api/codex-usage"),
+      ]);
     state.dashboard = dashboard;
     state.github = github;
     state.claudeCodeUsage = claudeCodeUsage;
+    state.claudeDesktopCloudUsage = claudeDesktopCloudUsage;
     state.codexRateLimits = codexRateLimits;
     state.codexUsage = codexUsage;
     renderLimitCards(dashboard);
     renderGithubSection(github);
-    renderClaudeCodeUsage(claudeCodeUsage);
+    renderClaudeCodeUsage(claudeCodeUsage, claudeDesktopCloudUsage);
     renderCodexUsage(codexRateLimits, codexUsage);
   } catch (error) {
     document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
@@ -1241,6 +1327,7 @@ if (typeof module !== "undefined") {
     githubAutoRefreshNoticeHtml,
     githubSectionHtml,
     claudeUsageWindowHtml,
+    resolveClaudeCodeUsageDisplay,
     claudeCodeSectionHtml,
     codexUsageWindowHtml,
     resolveCodexDisplay,

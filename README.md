@@ -190,6 +190,8 @@ ALLOW_PAID_MODEL_CALLS=false
 
 初回実装では取得結果の正規化と `collector_runs` への記録までを行い、`usage_records` への保存はまだ行いません。そのため `records_saved=0` です。Anthropic側でもspend limit / usage limitを設定してください。Claude Web版の残り利用枠は取得対象外です。
 
+Claude Codeの5時間枠・7日枠rate limit(CLI自動取得およびClaude Desktop Cloud手動fallback)については [docs/claude-code-usage-bridge.md](docs/claude-code-usage-bridge.md) を参照してください。
+
 ### Collector normalized records and save policy
 
 OpenAI / Gemini / Claude Collectorの戻り値は共通の `CollectorNormalizedRecord` 形式に揃えます。
