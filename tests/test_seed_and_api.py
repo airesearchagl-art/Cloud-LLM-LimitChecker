@@ -505,9 +505,12 @@ def test_collect_openai_dry_run_false_saves_usage_records(
                     "service_provider": "OpenAI",
                     "model_name": "openai_api",
                     "limit_type": "requests",
+                    "metric_kind": "usage",
                     "used_value": 1.0,
                     "unit": "requests",
-                    "recorded_at": "2026-05-24",
+                    "recorded_at": "2026-05-24T00:00:00+00:00",
+                    "period_start": "2026-05-23T00:00:00+00:00",
+                    "period_end": "2026-05-24T00:00:00+00:00",
                     "source_type": "api_openai_management",
                     "project_id": "project-test",
                 }
@@ -550,9 +553,12 @@ def test_collect_openai_dry_run_false_skips_duplicate_records(
                     "service_provider": "OpenAI",
                     "model_name": "openai_api",
                     "limit_type": "requests",
+                    "metric_kind": "usage",
                     "used_value": 1.0,
                     "unit": "requests",
                     "recorded_at": "2026-05-24T12:00:00+09:00",
+                    "period_start": "2026-05-24T00:00:00+09:00",
+                    "period_end": "2026-05-25T00:00:00+09:00",
                     "source_type": "api_openai_management",
                 }
             ]
@@ -759,11 +765,12 @@ def test_collect_gemini_dry_run_returns_200_and_saves_log(
     client, db, _ = api_client
     monkeypatch.setenv("ENABLE_VENDOR_COLLECTORS", "true")
     monkeypatch.setenv("ENABLE_GEMINI_COLLECTOR", "true")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 
     class FakeGeminiCollector:
-        def __init__(self, api_key=None, access_token=None, project_id=None) -> None:
-            self.api_key = api_key
+        def __init__(self, access_token=None, project_id=None) -> None:
+            self.access_token = access_token
 
         def collect(self):
             return [{"service_provider": "Gemini"}, {"service_provider": "Gemini"}]
@@ -793,10 +800,11 @@ def test_collect_gemini_management_api_error_returns_502(
     client, _, _ = api_client
     monkeypatch.setenv("ENABLE_VENDOR_COLLECTORS", "true")
     monkeypatch.setenv("ENABLE_GEMINI_COLLECTOR", "true")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 
     class FakeGeminiCollector:
-        def __init__(self, api_key=None, access_token=None, project_id=None) -> None:
+        def __init__(self, access_token=None, project_id=None) -> None:
             pass
 
         def collect(self):
@@ -818,10 +826,11 @@ def test_collect_gemini_network_error_returns_503(
     client, _, _ = api_client
     monkeypatch.setenv("ENABLE_VENDOR_COLLECTORS", "true")
     monkeypatch.setenv("ENABLE_GEMINI_COLLECTOR", "true")
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 
     class FakeGeminiCollector:
-        def __init__(self, api_key=None, access_token=None, project_id=None) -> None:
+        def __init__(self, access_token=None, project_id=None) -> None:
             pass
 
         def collect(self):

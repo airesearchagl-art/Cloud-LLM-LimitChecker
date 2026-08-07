@@ -5,7 +5,7 @@ from app.time_utils import app_tz
 
 
 class FakeGeminiUsageCostCollector(GeminiUsageCostCollector):
-    def _get_json(self, url, params, bearer_token=None):
+    def _get_json(self, url, params):
         if url.endswith("/timeSeries"):
             return {
                 "timeSeries": [
@@ -38,7 +38,6 @@ class FakeGeminiUsageCostCollector(GeminiUsageCostCollector):
 
 def test_gemini_collector_normalizes_mock_management_payloads() -> None:
     collector = FakeGeminiUsageCostCollector(
-        api_key="test-key",
         access_token="test-token",
         project_id="test-project",
     )
@@ -53,3 +52,9 @@ def test_gemini_collector_normalizes_mock_management_payloads() -> None:
     assert rows[0]["service_provider"] == "Gemini"
     assert rows[0]["source_type"] == "api_gemini_management"
     assert rows[0]["project_id"] == "test-project"
+
+    usage_row = next(row for row in rows if row["limit_type"] == "requests")
+    quota_row = next(row for row in rows if row["limit_type"] == "requests_per_day")
+    assert usage_row["metric_kind"] == "usage"
+    assert quota_row["metric_kind"] == "quota"
+    assert quota_row["unit"] == "quota_count"
