@@ -115,17 +115,22 @@ silent skipはしない。dry_run・実保存いずれも、レコード単位�
 - 公式ドキュメントで、Cloud Monitoring / Service Usage / Cloud Billing BudgetのいずれもAPIキー認証に対応していないことを確認（本ドキュメント2節）。
 - `GeminiUsageCostCollector`から`api_key`フィールドを完全に削除（無効化ではなく削除。将来の変更で誤って再度有効化できないようにするため）。
 - URLクエリ文字列・ヘッダーのいずれにも、いかなる状況でもAPIキーを含めない。
-- `access_token`（OAuth2/ADC）が無い場合は`GeminiCollectorConfigError`で即座に停止する（空配列を返して「取得成功・0件」に見せることはしない）。
-- HTTPエラーメッセージは固定文言のみを返し、レスポンスボディやURLを一切含めない（Gemini以外の2vendorは詳細メッセージを240文字に切り詰めて含めるが、Geminiだけはそれも行わない — より厳格）。
+- `access_token`が無い場合は`GeminiCollectorConfigError`で即座に停止する(空配列を返して「取得成功・0件」に見せることはしない)。
+- HTTPエラーメッセージは固定文言のみを返し、レスポンスボディやURLを一切含めない(Gemini以外の2vendorは詳細メッセージを240文字に切り詰めて含めるが、Geminiだけはそれも行わない — より厳格)。
+
+**実装範囲(ADC非対応)**: 公式にはOAuth2アクセストークンとApplication Default Credentials(ADC)の両方が有効な認証経路だが、このCollectorが実装しているのは**利用者が用意した静的なOAuth2アクセストークン(`GOOGLE_CLOUD_ACCESS_TOKEN`)のみ**。ADCの資格情報自動探索・サービスアカウントなりすまし・トークン自動更新は実装しておらず、新規dependency(例: `google-auth`)も本PRでは追加していない。トークンの取得・有効期限管理・更新は呼び出し側(利用者)の責任であり、`app/collectors/gemini_collector.py`のモジュールdocstring・`app/collectors/preflight.py`の`gemini_preflight()`・README・`.env.example`すべてにこの範囲を明記している。ADCの正式対応は将来候補として4節に記録する。
 
 ### Config preflight（`app/collectors/preflight.py`, `GET /api/collector-preflight`）
 
-- ネットワーク通信なしで、vendorごとの`configured` / `auth_mode` / `production_ready` / `missing_requirements` / `notes`を返す。
+- ネットワーク通信なしで、vendorごとの`configured`(何らかの関連credentialが設定されているか) / `configuration_complete`(実行に必要な全env varが揃っているか) / `auth_mode` / `live_validation_required`(常にtrue) / `production_ready`(常にfalse。後方互換のため残すフィールドで、network-freeな確認だけでは決して`true`にしない) / `missing_requirements` / `notes`を返す。
+- `production_ready`を`configuration_complete`のような「設定が揃っている」ことの代わりに使わない。実Credentialでの接続確認(6節のHuman Gate)が完了するまで、全vendorで常に`false`。
 - key値・token値・Credentialのpath・account/organization名・Secretの長さ・prefix/suffix・hashは一切返さない（Claudeのkey prefix判定はbool判定の結果のみを`notes`の固定文言として返し、実際のprefix文字列そのものは出力しない）。
 
-## 5. Production Ready / Partial / Unsupported / Inconclusive 分類（実装状態ベース）
+## 5. 実装状態の分類（Implemented / Partial / Unsupported / Inconclusive）
 
-- **Production Ready（実装済み・公式仕様に一致）**: OpenAI usage/costs、Claude usage/cost report
+**注意**: このセクションの分類は「コード実装が公式仕様と一致しているか」のコードレベル判定であり、`GET /api/collector-preflight`が返す`production_ready`フィールド(4節、実Credentialでの接続確認が完了するまで常に`false`)とは別の軸。両者を混同しないこと — 以下でいう"Implemented"は「実装済みで公式仕様と一致」を意味するだけで、実Credentialでの動作確認(6節のHuman Gate)が済んでいることを意味しない。
+
+- **Implemented（実装済み・公式仕様に一致）**: OpenAI usage/costs、Claude usage/cost report、Gemini usage(Cloud Monitoring、静的OAuth2アクセストークンのみ・ADC未対応)/quota(Service Usage)
 - **Partial（公式APIは存在するが未実装）**: OpenAI project rate limits（quota）、Claude organization rate limits（quota）、Gemini Cloud Billing Budget API
 - **Unsupported（公式に読み取り経路が存在しない、または対象外と明記）**: OpenAI budget読み取り（POSTのみ確認）、Claude spend limits（Console組織では利用不可と公式に明記）
 - **Inconclusive**: 本PR内では無し（Gemini APIキーのauth可否は、当初Inconclusive-but-fail-closedとして実装したが、その後の追加調査でConfirmed（OAuth2必須・APIキー不可）に格上げ済み）
@@ -135,7 +140,7 @@ silent skipはしない。dry_run・実保存いずれも、レコード単位�
 以下は本PRでは実施しておらず、ユーザーの明示的な許可のもとで別セッション・別PRとして進める。
 
 - **OpenAI**: Organization Admin API keyでの実接続確認（通常keyでは401/403になることの実地確認を含む）
-- **Google Cloud / Gemini**: OAuth2アクセストークン（またはADC）+ プロジェクトIDでの実接続確認。必要IAM: `roles/monitoring.viewer`系（Monitoring Viewer）、`roles/servicemanagement.quotaViewer`（Quota Viewer）
+- **Google Cloud / Gemini**: 静的OAuth2アクセストークン(`GOOGLE_CLOUD_ACCESS_TOKEN`、現行実装が受け付ける唯一の方式)+ プロジェクトIDでの実接続確認。必要IAM: `roles/monitoring.viewer`系（Monitoring Viewer）、`roles/servicemanagement.quotaViewer`（Quota Viewer）。ADCの正式対応(新規dependency追加を伴う)は別途の設計判断として扱う
 - **Anthropic / Claude**: organization Admin API key（`sk-ant-admin01-`）での実接続確認
 
 値（実際のkey/token文字列）はこのドキュメントにもVaultにも記録しない。
