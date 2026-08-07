@@ -29,7 +29,13 @@ from app.codex_rate_limits_state import (
     CodexRateLimitsRefreshInProgressError,
 )
 from app.codex_rate_limits_scheduler import CodexRateLimitsScheduler
-from app.collectors.importer import CollectorImportError, import_normalized_records
+from app.collectors.importer import (
+    CollectorImportError,
+    ImportOutcome,
+    import_normalized_records_detailed,
+    plan_normalized_records,
+)
+from app.collectors.preflight import all_vendor_preflight_statuses
 from app.collectors.claude_collector import (
     ClaudeCollectorConfigError,
     ClaudeManagementAPIError,
@@ -256,7 +262,7 @@ def run_collector(
     vendor: str,
     dry_run: bool | None = None,
     db: Session = Depends(get_db),
-) -> models.CollectorRun:
+) -> models.CollectorRun | schemas.CollectorRunRead:
     try:
         vendor_name = normalize_collector_vendor(vendor)
     except UnknownCollectorVendorError as exc:
@@ -290,7 +296,7 @@ def run_collector(
     return run_openai_collector(db, run, dry_run_value)
 
 
-def run_openai_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> models.CollectorRun:
+def run_openai_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> schemas.CollectorRunRead:
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         crud.finish_collector_run_blocked(db, run.id, "OPENAI_API_KEY is not configured")
@@ -312,23 +318,24 @@ def run_openai_collector(db: Session, run: models.CollectorRun, dry_run: bool) -
     return finish_collector_import(db, run, rows, dry_run)
 
 
-def run_gemini_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> models.CollectorRun:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip() or None
+def run_gemini_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> schemas.CollectorRunRead:
     access_token = os.getenv("GOOGLE_CLOUD_ACCESS_TOKEN", "").strip() or None
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or os.getenv("GEMINI_PROJECT_ID", "").strip() or None
-    if not api_key and not access_token:
-        crud.finish_collector_run_blocked(
-            db,
-            run.id,
-            "GEMINI_API_KEY or Google Cloud management credentials are not configured",
+    # GEMINI_API_KEY is intentionally never read here: Cloud Monitoring and
+    # Service Usage (the only APIs this collector calls) require an OAuth2/ADC
+    # access token, never an API key — see
+    # app/collectors/gemini_collector.py and
+    # docs/vendor-collector-production-readiness.md ("Gemini Security").
+    if not access_token or not project_id:
+        message = (
+            "Google Cloud OAuth2/ADC access token (GOOGLE_CLOUD_ACCESS_TOKEN) and "
+            "project (GOOGLE_CLOUD_PROJECT or GEMINI_PROJECT_ID) are not configured. "
+            "A Gemini API key alone cannot authenticate to the management APIs."
         )
-        raise HTTPException(
-            status_code=400,
-            detail="GEMINI_API_KEY or Google Cloud management credentials are not configured",
-        )
+        crud.finish_collector_run_blocked(db, run.id, message)
+        raise HTTPException(status_code=400, detail=message)
     try:
         rows = GeminiUsageCostCollector(
-            api_key=api_key,
             access_token=access_token,
             project_id=project_id,
         ).collect()
@@ -347,7 +354,7 @@ def run_gemini_collector(db: Session, run: models.CollectorRun, dry_run: bool) -
     return finish_collector_import(db, run, rows, dry_run)
 
 
-def run_claude_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> models.CollectorRun:
+def run_claude_collector(db: Session, run: models.CollectorRun, dry_run: bool) -> schemas.CollectorRunRead:
     api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
     organization_id = os.getenv("ANTHROPIC_ORGANIZATION_ID", "").strip() or None
     workspace_id = os.getenv("ANTHROPIC_WORKSPACE_ID", "").strip() or None
@@ -375,25 +382,60 @@ def run_claude_collector(db: Session, run: models.CollectorRun, dry_run: bool) -
     return finish_collector_import(db, run, rows, dry_run)
 
 
+def _outcomes_to_schema(outcomes: list[ImportOutcome]) -> list[schemas.CollectorImportOutcomeRead]:
+    return [
+        schemas.CollectorImportOutcomeRead(
+            reason=outcome.reason,
+            vendor=outcome.vendor,
+            model_name=outcome.model_name,
+            limit_type=outcome.limit_type,
+            metric_kind=outcome.metric_kind,
+            detail=outcome.detail,
+        )
+        for outcome in outcomes
+    ]
+
+
 def finish_collector_import(
     db: Session,
     run: models.CollectorRun,
     rows: list[dict],
     dry_run: bool,
-) -> models.CollectorRun:
+) -> schemas.CollectorRunRead:
     if dry_run:
-        return crud.finish_collector_run_success(db, run.id, records_found=len(rows), records_saved=0)
-    try:
-        records_saved = import_normalized_records(db, rows)
-    except CollectorImportError as exc:
-        crud.finish_collector_run_failed(db, run.id, str(exc))
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return crud.finish_collector_run_success(db, run.id, records_found=len(rows), records_saved=records_saved)
+        # dry_run still validates every row and computes the same
+        # imported/updated/duplicate/unsupported_metric_kind decision
+        # import_normalized_records_detailed would make — it just never
+        # writes anything (see plan_normalized_records).
+        result = plan_normalized_records(db, rows)
+        finished = crud.finish_collector_run_success(db, run.id, records_found=len(rows), records_saved=0)
+    else:
+        try:
+            result = import_normalized_records_detailed(db, rows)
+        except CollectorImportError as exc:
+            crud.finish_collector_run_failed(db, run.id, str(exc))
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finished = crud.finish_collector_run_success(
+            db, run.id, records_found=len(rows), records_saved=result.records_saved
+        )
+    response = schemas.CollectorRunRead.model_validate(finished)
+    return response.model_copy(update={"outcomes": _outcomes_to_schema(result.outcomes)})
 
 
 @app.get("/api/collector-runs", response_model=list[schemas.CollectorRunRead])
 def collector_runs(vendor: str | None = None, db: Session = Depends(get_db)) -> list[models.CollectorRun]:
     return crud.list_collector_runs(db, vendor=vendor)
+
+
+@app.get("/api/collector-preflight", response_model=list[schemas.CollectorPreflightStatusRead])
+def collector_preflight() -> list:
+    """Read-only, network-free configuration status for each vendor collector.
+
+    Never calls any vendor API and never returns any part of a credential
+    value (no keys, tokens, paths, account/organization identifiers,
+    lengths, prefixes, or hashes) — see app/collectors/preflight.py.
+    """
+    return all_vendor_preflight_statuses()
 
 
 @app.get("/api/dashboard", response_model=list[schemas.DashboardLimit])

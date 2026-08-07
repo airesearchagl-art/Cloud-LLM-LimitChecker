@@ -1,12 +1,17 @@
 import hashlib
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models
-from app.collectors.types import CollectorNormalizedRecord, validate_normalized_record
+from app.collectors.types import (
+    PERSISTABLE_METRIC_KINDS,
+    CollectorNormalizedRecord,
+    validate_normalized_record,
+)
 from app.time_utils import app_tz, now_local
 
 
@@ -19,6 +24,8 @@ SERVICE_BY_VENDOR = {
     "gemini": {"name": "Gemini API", "provider": "Google"},
     "claude": {"name": "Claude API", "provider": "Anthropic"},
 }
+
+_VALUE_EQUALITY_TOLERANCE = 1e-9
 
 
 def parse_recorded_at(value: str) -> datetime:
@@ -33,6 +40,12 @@ def parse_recorded_at(value: str) -> datetime:
 
 
 def build_import_key(record: CollectorNormalizedRecord | dict) -> str:
+    # Identity is the (vendor, source, scope, metric, unit, period) tuple —
+    # never used_value (a revised value for the same identity must UPDATE the
+    # existing row, not create a duplicate or be silently ignored — see
+    # _plan_and_apply). period_start/period_end (not the display-only
+    # recorded_at string) pin the exact bucket, since they are validated
+    # timezone-aware datetimes rather than a loosely-typed string.
     normalized = validate_normalized_record(record)
     payload = {
         "vendor": normalized.vendor,
@@ -42,8 +55,10 @@ def build_import_key(record: CollectorNormalizedRecord | dict) -> str:
         "workspace_id": normalized.workspace_id,
         "model_name": normalized.model_name,
         "limit_type": normalized.limit_type,
+        "metric_kind": normalized.metric_kind,
         "unit": normalized.unit,
-        "recorded_at": normalized.recorded_at,
+        "period_start": normalized.period_start.isoformat(),
+        "period_end": normalized.period_end.isoformat(),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -111,17 +126,136 @@ def get_or_create_api_limit(
     return limit
 
 
-def import_normalized_records(db: Session, records: list[CollectorNormalizedRecord | dict]) -> int:
-    saved = 0
+@dataclass(slots=True)
+class ImportOutcome:
+    """Per-record import decision. Returned to the caller (and, for
+    POST /api/collect/{vendor}, surfaced in the API response) but never
+    persisted to the database — CollectorRun only stores aggregate
+    records_found/records_saved counts, so this breakdown only exists for the
+    lifetime of a single request/response."""
+
+    reason: str
+    vendor: str
+    model_name: str
+    limit_type: str
+    metric_kind: str | None = None
+    detail: str | None = None
+
+
+@dataclass(slots=True)
+class ImportResult:
+    records_saved: int = 0
+    outcomes: list[ImportOutcome] = field(default_factory=list)
+
+
+def _values_equal(a: float, b: float) -> bool:
+    return abs(a - b) < _VALUE_EQUALITY_TOLERANCE
+
+
+def _plan_and_apply(
+    db: Session,
+    records: list[CollectorNormalizedRecord | dict],
+    *,
+    persist: bool,
+) -> ImportResult:
+    result = ImportResult()
     try:
         for raw_record in records:
-            record = validate_normalized_record(raw_record)
+            try:
+                record = validate_normalized_record(raw_record)
+            except Exception as exc:
+                if persist:
+                    # Preserves the original fail-fast/whole-batch-rollback
+                    # contract for real writes (see
+                    # test_import_rolls_back_earlier_records_when_later_record_fails).
+                    raise
+                label = raw_record.get("model_name", "unknown") if isinstance(raw_record, dict) else "unknown"
+                result.outcomes.append(
+                    ImportOutcome(
+                        reason="invalid_record",
+                        vendor=raw_record.get("vendor", "unknown") if isinstance(raw_record, dict) else "unknown",
+                        model_name=label,
+                        limit_type=raw_record.get("limit_type", "unknown") if isinstance(raw_record, dict) else "unknown",
+                        detail="record failed normalized-record validation",
+                    )
+                )
+                continue
+
+            if record.metric_kind not in PERSISTABLE_METRIC_KINDS:
+                result.outcomes.append(
+                    ImportOutcome(
+                        reason="unsupported_metric_kind",
+                        vendor=record.vendor,
+                        model_name=record.model_name,
+                        limit_type=record.limit_type,
+                        metric_kind=record.metric_kind,
+                        detail=f"metric_kind={record.metric_kind!r} is never persisted as a UsageRecord",
+                    )
+                )
+                continue
+
             recorded_at = parse_recorded_at(record.recorded_at)
             import_key = build_import_key(record)
             existing = db.scalar(
                 select(models.CollectorImport).where(models.CollectorImport.import_key == import_key)
             )
+
             if existing is not None:
+                existing_usage_record = db.get(models.UsageRecord, existing.usage_record_id)
+                same_value = existing_usage_record is not None and _values_equal(
+                    existing_usage_record.used_value, record.used_value
+                )
+                if same_value:
+                    result.outcomes.append(
+                        ImportOutcome(
+                            reason="duplicate",
+                            vendor=record.vendor,
+                            model_name=record.model_name,
+                            limit_type=record.limit_type,
+                            metric_kind=record.metric_kind,
+                        )
+                    )
+                    continue
+                if not persist:
+                    result.outcomes.append(
+                        ImportOutcome(
+                            reason="dry_run",
+                            vendor=record.vendor,
+                            model_name=record.model_name,
+                            limit_type=record.limit_type,
+                            metric_kind=record.metric_kind,
+                            detail="would update the existing record with a revised value",
+                        )
+                    )
+                    continue
+                existing_usage_record.used_value = record.used_value
+                existing_usage_record.recorded_at = recorded_at
+                existing_usage_record.limit.updated_at = now_local()
+                db.add(existing_usage_record)
+                db.flush()
+                result.records_saved += 1
+                result.outcomes.append(
+                    ImportOutcome(
+                        reason="updated",
+                        vendor=record.vendor,
+                        model_name=record.model_name,
+                        limit_type=record.limit_type,
+                        metric_kind=record.metric_kind,
+                    )
+                )
+                continue
+
+            if not persist:
+                result.outcomes.append(
+                    ImportOutcome(
+                        reason="dry_run",
+                        vendor=record.vendor,
+                        model_name=record.model_name,
+                        limit_type=record.limit_type,
+                        metric_kind=record.metric_kind,
+                        detail="would be imported as a new record",
+                    )
+                )
                 continue
 
             service = get_or_create_api_service(db, record)
@@ -150,13 +284,53 @@ def import_normalized_records(db: Session, records: list[CollectorNormalizedReco
                     created_at=now_local(),
                 )
             )
-            saved += 1
-        db.commit()
+            result.records_saved += 1
+            result.outcomes.append(
+                ImportOutcome(
+                    reason="imported",
+                    vendor=record.vendor,
+                    model_name=record.model_name,
+                    limit_type=record.limit_type,
+                    metric_kind=record.metric_kind,
+                )
+            )
+        if persist:
+            db.commit()
     except CollectorImportError:
-        db.rollback()
+        if persist:
+            db.rollback()
         raise
     except Exception as exc:
-        db.rollback()
+        if persist:
+            db.rollback()
         raise CollectorImportError(str(exc)) from exc
 
-    return saved
+    return result
+
+
+def import_normalized_records(db: Session, records: list[CollectorNormalizedRecord | dict]) -> int:
+    """Persist eligible records (writes + commits). Returns the count actually
+    saved (imported + updated, matching the pre-existing contract). Kept as
+    the original int-returning entry point for backward compatibility; see
+    import_normalized_records_detailed for the same write path with
+    per-record reasons, and plan_normalized_records for the dry_run-safe
+    (no-write) variant."""
+    return _plan_and_apply(db, records, persist=True).records_saved
+
+
+def import_normalized_records_detailed(
+    db: Session, records: list[CollectorNormalizedRecord | dict]
+) -> ImportResult:
+    """Same write path as import_normalized_records, but returns the full
+    ImportResult (records_saved + per-record outcomes) instead of just a
+    count."""
+    return _plan_and_apply(db, records, persist=True)
+
+
+def plan_normalized_records(db: Session, records: list[CollectorNormalizedRecord | dict]) -> ImportResult:
+    """Read-only: validates records and computes exactly what
+    import_normalized_records WOULD do (imported/updated/duplicate/
+    unsupported_metric_kind/invalid_record), without writing anything to the
+    database. Used for dry_run so a preview reflects real import decisions
+    instead of just a raw fetched-row count."""
+    return _plan_and_apply(db, records, persist=False)
