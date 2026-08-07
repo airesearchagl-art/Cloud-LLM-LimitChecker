@@ -13,7 +13,10 @@ class FakeGeminiUsageCostCollector(GeminiUsageCostCollector):
                         "metric": {"labels": {"model": "gemini-test"}},
                         "points": [
                             {
-                                "interval": {"endTime": "2026-05-24T00:00:00+09:00"},
+                                "interval": {
+                                    "startTime": "2026-05-23T00:00:00+09:00",
+                                    "endTime": "2026-05-24T00:00:00+09:00",
+                                },
                                 "value": {"int64Value": "7"},
                             }
                         ],
@@ -56,5 +59,43 @@ def test_gemini_collector_normalizes_mock_management_payloads() -> None:
     usage_row = next(row for row in rows if row["limit_type"] == "requests")
     quota_row = next(row for row in rows if row["limit_type"] == "requests_per_day")
     assert usage_row["metric_kind"] == "usage"
+    assert usage_row["period_start"] == "2026-05-23T00:00:00+09:00"
+    assert usage_row["period_end"] == "2026-05-24T00:00:00+09:00"
     assert quota_row["metric_kind"] == "quota"
     assert quota_row["unit"] == "quota_count"
+    # quota has no vendor-provided period at all (a point-in-time snapshot,
+    # not a time series) — the collector must not substitute the request's
+    # start/end window for it.
+    assert quota_row["period_start"] < quota_row["period_end"]
+
+
+def test_gemini_collector_point_missing_start_time_produces_unvalidated_row() -> None:
+    # The collector never fabricates a period — a point missing startTime
+    # passes through with period_start=None rather than being backfilled
+    # from the request window. Validation/rejection is
+    # app.collectors.types.CollectorNormalizedRecord's job, not the
+    # collector's.
+    class FakeMissingStartTime(GeminiUsageCostCollector):
+        def _get_json(self, url, params):
+            if url.endswith("/timeSeries"):
+                return {
+                    "timeSeries": [
+                        {
+                            "metric": {"labels": {"model": "gemini-test"}},
+                            "points": [
+                                {
+                                    "interval": {"endTime": "2026-05-24T00:00:00+09:00"},
+                                    "value": {"int64Value": "7"},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return {"metrics": []}
+
+    rows = FakeMissingStartTime(access_token="test-token", project_id="test-project").collect()
+
+    usage_rows = [row for row in rows if row["limit_type"] == "requests"]
+    assert len(usage_rows) == 1
+    assert usage_rows[0]["period_start"] is None
+    assert usage_rows[0]["period_end"] == "2026-05-24T00:00:00+09:00"

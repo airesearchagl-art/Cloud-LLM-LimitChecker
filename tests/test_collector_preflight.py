@@ -1,6 +1,8 @@
 """Coverage for the network-free vendor config preflight (app/collectors/preflight.py
 and GET /api/collector-preflight). Never makes a network call; never returns
-any part of a credential value."""
+any part of a credential value; production_ready must never be reported true
+by a network-free check (see the module docstring in preflight.py) — only
+configuration_complete reflects whether the required env vars are present."""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,6 +35,29 @@ def clear_vendor_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# production_ready must always be false — for every vendor, in every state
+# ---------------------------------------------------------------------------
+
+
+def test_production_ready_is_always_false_regardless_of_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unconfigured
+    for status in all_vendor_preflight_statuses():
+        assert status.production_ready is False
+        assert status.live_validation_required is True
+
+    # Fully configured for all three vendors
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-admin-test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-admin01-test-key")
+
+    for status in all_vendor_preflight_statuses():
+        assert status.configuration_complete is True
+        assert status.production_ready is False  # still false — configured is not validated
+        assert status.live_validation_required is True
+
+
+# ---------------------------------------------------------------------------
 # openai_preflight
 # ---------------------------------------------------------------------------
 
@@ -41,17 +66,19 @@ def test_openai_preflight_reports_missing_when_unset() -> None:
     status = openai_preflight()
 
     assert status.configured is False
+    assert status.configuration_complete is False
     assert status.production_ready is False
     assert "OPENAI_API_KEY" in status.missing_requirements
 
 
-def test_openai_preflight_reports_configured_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openai_preflight_reports_complete_when_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-should-never-appear-in-output")
 
     status = openai_preflight()
 
     assert status.configured is True
-    assert status.production_ready is True
+    assert status.configuration_complete is True
+    assert status.production_ready is False
     assert status.missing_requirements == []
     assert status.auth_mode == "organization_admin_api_key"
 
@@ -75,21 +102,36 @@ def test_gemini_preflight_reports_missing_when_unset() -> None:
     status = gemini_preflight()
 
     assert status.configured is False
+    assert status.configuration_complete is False
     assert status.production_ready is False
     assert "GOOGLE_CLOUD_ACCESS_TOKEN" in status.missing_requirements
     assert any("GOOGLE_CLOUD_PROJECT" in item for item in status.missing_requirements)
 
 
-def test_gemini_preflight_api_key_alone_is_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gemini_preflight_api_key_alone_is_not_configuration_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     # The core security assertion: GEMINI_API_KEY alone must never be
-    # reported as sufficient/production_ready for the management APIs.
+    # reported as sufficient/complete for the management APIs.
     monkeypatch.setenv("GEMINI_API_KEY", "test-key-should-not-be-sufficient")
 
     status = gemini_preflight()
 
-    assert status.configured is False
+    assert status.configuration_complete is False
     assert status.production_ready is False
     assert "GOOGLE_CLOUD_ACCESS_TOKEN" in status.missing_requirements
+
+
+def test_gemini_preflight_api_key_alone_is_reported_as_attempted_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `configured` (an attempt was made) is distinct from
+    # `configuration_complete` (all required vars present) — this is the
+    # whole point of splitting the two fields for Gemini specifically.
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key-should-not-be-sufficient")
+
+    status = gemini_preflight()
+
+    assert status.configured is True
+    assert status.configuration_complete is False
 
 
 def test_gemini_preflight_api_key_alone_adds_explanatory_note(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,16 +142,26 @@ def test_gemini_preflight_api_key_alone_adds_explanatory_note(monkeypatch: pytes
     assert any("GEMINI_API_KEY" in note for note in status.notes)
 
 
-def test_gemini_preflight_configured_when_oauth_and_project_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gemini_preflight_complete_when_oauth_and_project_set(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
 
     status = gemini_preflight()
 
     assert status.configured is True
-    assert status.production_ready is True
+    assert status.configuration_complete is True
+    assert status.production_ready is False
     assert status.missing_requirements == []
     assert status.auth_mode == "oauth2_access_token"
+
+
+def test_gemini_preflight_notes_mention_adc_is_not_implemented(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+
+    status = gemini_preflight()
+
+    assert any("Application Default Credentials" in note for note in status.notes)
 
 
 def test_gemini_preflight_never_echoes_configured_token_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,17 +184,19 @@ def test_claude_preflight_reports_missing_when_unset() -> None:
     status = claude_preflight()
 
     assert status.configured is False
+    assert status.configuration_complete is False
     assert status.production_ready is False
     assert "ANTHROPIC_API_KEY" in status.missing_requirements
 
 
-def test_claude_preflight_configured_with_admin_key_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_claude_preflight_complete_with_admin_key_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-admin01-should-never-appear-in-output")
 
     status = claude_preflight()
 
     assert status.configured is True
-    assert status.production_ready is True
+    assert status.configuration_complete is True
+    assert status.production_ready is False
     assert not any("expected Admin API key prefix" in note for note in status.notes)
 
 
@@ -152,7 +206,7 @@ def test_claude_preflight_warns_on_unexpected_key_prefix(monkeypatch: pytest.Mon
     status = claude_preflight()
 
     # Soft signal only — never a hard block on a guessable prefix pattern.
-    assert status.configured is True
+    assert status.configuration_complete is True
     assert any("expected Admin API key prefix" in note for note in status.notes)
 
 
@@ -191,7 +245,7 @@ def test_collector_preflight_endpoint_never_makes_network_calls(monkeypatch: pyt
     assert response.status_code == 200
 
 
-def test_collector_preflight_endpoint_returns_all_vendors() -> None:
+def test_collector_preflight_endpoint_returns_all_vendors_with_expected_shape() -> None:
     with TestClient(app) as client:
         response = client.get("/api/collector-preflight")
 
@@ -202,11 +256,32 @@ def test_collector_preflight_endpoint_returns_all_vendors() -> None:
         assert set(item.keys()) == {
             "vendor",
             "configured",
+            "configuration_complete",
             "auth_mode",
+            "live_validation_required",
             "production_ready",
             "missing_requirements",
             "notes",
         }
+
+
+def test_collector_preflight_endpoint_never_reports_production_ready_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-admin-test-key")
+    monkeypatch.setenv("GOOGLE_CLOUD_ACCESS_TOKEN", "test-token")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-admin01-test-key")
+
+    with TestClient(app) as client:
+        response = client.get("/api/collector-preflight")
+
+    assert response.status_code == 200
+    body = response.json()
+    for item in body:
+        assert item["production_ready"] is False
+        assert item["live_validation_required"] is True
+        assert item["configuration_complete"] is True
 
 
 def test_collector_preflight_endpoint_never_leaks_configured_secret_values(

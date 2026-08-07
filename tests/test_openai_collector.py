@@ -203,6 +203,86 @@ def test_openai_collector_ignores_malformed_result_entries() -> None:
     assert rows == []
 
 
+def test_openai_collector_bucket_missing_period_produces_unvalidated_row() -> None:
+    # The collector never fabricates a period — a bucket missing start_time/
+    # end_time passes through with period_start/period_end=None rather than
+    # being backfilled with now()-1d. Validation/rejection is
+    # app.collectors.types.CollectorNormalizedRecord's job, not the
+    # collector's.
+    class FakeMissingPeriod(OpenAIUsageCostCollector):
+        def _get_json(self, path, params):
+            if path.endswith("/usage/completions"):
+                return {"data": [{"results": [{"model": "gpt-test", "num_model_requests": 1}]}]}
+            return {"data": []}
+
+    rows = FakeMissingPeriod(api_key="test-key").collect()
+
+    assert len(rows) == 1
+    assert rows[0]["period_start"] is None
+    assert rows[0]["period_end"] is None
+    assert rows[0]["recorded_at"] == ""
+
+
+def test_openai_collector_ignores_nan_and_infinity_values() -> None:
+    class FakeNonFinite(OpenAIUsageCostCollector):
+        def _get_json(self, path, params):
+            if path.endswith("/usage/completions"):
+                return {
+                    "data": [
+                        {
+                            "start_time": 1763895600,
+                            "end_time": 1763982000,
+                            "results": [
+                                {
+                                    "model": "gpt-test",
+                                    "input_tokens": "NaN",
+                                    "output_tokens": "Infinity",
+                                    "num_model_requests": "-Infinity",
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return {"data": []}
+
+    rows = FakeNonFinite(api_key="test-key").collect()
+
+    assert rows == []
+
+
+def test_openai_collector_generic_error_never_echoes_response_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret_marker = "SECRET-SHOULD-NEVER-LEAK-INTO-EXCEPTION"
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 500, "Internal Server Error", None, io.BytesIO(secret_marker.encode("utf-8"))
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    collector = OpenAIUsageCostCollector(api_key="test-key")
+    with pytest.raises(OpenAIManagementAPIError) as exc_info:
+        collector.collect()
+
+    assert secret_marker not in str(exc_info.value)
+    assert "500" in str(exc_info.value)
+
+
+def test_openai_collector_network_error_has_no_dynamic_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    sensitive_detail = "some low-level socket/proxy detail that might be sensitive"
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.URLError(sensitive_detail)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    collector = OpenAIUsageCostCollector(api_key="test-key")
+    with pytest.raises(Exception) as exc_info:
+        collector.collect()
+
+    assert sensitive_detail not in str(exc_info.value)
+
+
 def test_openai_collector_403_error_message_is_generic_and_actionable(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(request, timeout=None):
         raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", None, io.BytesIO(b""))

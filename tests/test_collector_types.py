@@ -197,3 +197,49 @@ def test_validate_record_accepts_all_canonical_units_with_matching_kind() -> Non
         validated = validate_normalized_record(valid_record(metric_kind=metric_kind, unit=unit))
         assert validated.metric_kind == metric_kind
         assert validated.unit == unit
+
+
+# ---------------------------------------------------------------------------
+# used_value must be a finite number
+# ---------------------------------------------------------------------------
+
+
+def test_validate_record_rejects_nan_string_used_value() -> None:
+    record = valid_record(used_value="NaN")
+
+    with pytest.raises(ValidationError):
+        validate_normalized_record(record)
+
+
+def test_validate_record_rejects_infinity_string_used_value() -> None:
+    record = valid_record(used_value="Infinity")
+
+    with pytest.raises(ValidationError):
+        validate_normalized_record(record)
+
+
+def test_validate_record_rejects_negative_infinity_string_used_value() -> None:
+    record = valid_record(used_value="-Infinity")
+
+    with pytest.raises(ValidationError):
+        validate_normalized_record(record)
+
+
+def test_validate_record_rejects_float_nan_used_value() -> None:
+    record = valid_record(used_value=float("nan"))
+
+    with pytest.raises(ValidationError):
+        validate_normalized_record(record)
+
+
+def test_validate_record_rejects_float_inf_used_value() -> None:
+    record = valid_record(used_value=float("inf"))
+
+    with pytest.raises(ValidationError):
+        validate_normalized_record(record)
+
+
+def test_validate_record_accepts_ordinary_finite_used_value() -> None:
+    validated = validate_normalized_record(valid_record(used_value=42.5))
+
+    assert validated.used_value == 42.5
