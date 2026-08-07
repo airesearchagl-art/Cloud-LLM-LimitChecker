@@ -130,7 +130,11 @@ GET  /api/collector-runs
 
 `vendor` は `openai` / `gemini` / `claude` のみです。Collector実行は `collector_runs` に記録され、dry-runも日次実行回数に含まれます。日次上限は `MAX_COLLECTOR_CALLS_PER_DAY` で制御します。
 
-Gemini / Claude のCollector APIは現時点では外部APIを呼ばない雛形です。OpenAI Collectorを含む実Collector実装時は、usage / costs / billing / quota / rate limit 系の管理情報取得APIに限定し、モデル推論APIは呼ばないでください。
+OpenAI / Gemini / Claude Collectorはいずれも実際に管理APIへ`GET`通信を行う実装です(生成・推論APIは呼びません)。各vendorの公式仕様・現行実装とのgap・認証方式の判断根拠は [docs/vendor-collector-production-readiness.md](docs/vendor-collector-production-readiness.md) を参照してください。
+
+### Collector config preflight
+
+`GET /api/collector-preflight` で、各vendorの設定状態をネットワーク通信なしで確認できます。`configured` / `auth_mode` / `production_ready` / `missing_requirements` / `notes` を返し、APIキーやtoken、organization名などの値そのものは一切含みません。
 
 ### OpenAI Collector
 
@@ -143,39 +147,39 @@ OPENAI_API_KEY=...
 ALLOW_PAID_MODEL_CALLS=false
 ```
 
-`ALLOW_PAID_MODEL_CALLS=false` のまま使います。まずは `POST /api/collect/openai?dry_run=true` を推奨します。初回実装では取得結果の正規化と `collector_runs` への記録までを行い、`usage_records` への保存はまだ行いません。そのため `records_saved=0` です。
+`OPENAI_API_KEY` は**Organization Admin API key**(Organization → Admin keysで作成)である必要があります。通常の(project-scoped)APIキーではusage/costs管理APIにアクセスできません。`ALLOW_PAID_MODEL_CALLS=false` のまま使います。まずは `POST /api/collect/openai?dry_run=true` を推奨します。
 
-OpenAI側でもspend cap / budget limitを設定してください。ChatGPT Web版の残メッセージ数やPlus/ProのWeb利用枠はOpenAI APIのusage/cost Collectorでは取得対象外です。
+OpenAI側でもspend cap / budget limitを設定してください。ただし公式APIにはbudget/spend capの**読み取り**専用エンドポイントが見つかっておらず(設定用のPOSTのみ確認)、このCollectorはbudget値を取得しません。ChatGPT Web版の残メッセージ数やPlus/ProのWeb利用枠はOpenAI APIのusage/cost Collectorでは取得対象外です。
 
 ### OpenAI Collector dry-run and permissions
 
-`dry_run=true` は `usage_records` に保存しない確認モードです。ただし、OpenAI の usage/costs 管理APIへの `GET` 通信は発生します。モデル推論APIやトークン課金対象の生成APIは呼びません。外部通信自体を避けたい場合は、Collectorを実行しないでください。
+`dry_run=true` は `usage_records` に保存しない確認モードです。ただし、OpenAI の usage/costs 管理APIへの `GET` 通信は発生します(正規化・import判定は行いますが、書き込みは一切行いません)。モデル推論APIやトークン課金対象の生成APIは呼びません。外部通信自体を避けたい場合は、Collectorを実行しないでください。
 
-実行前にOpenAI側でspend cap / budget limitを設定してください。usage / costs 系APIは通常のAPIキーでは取得できない場合があり、organization / project の権限が必要になることがあります。OpenAI管理APIから `401` / `403` が返った場合、このアプリではOpenAI管理APIエラーとして扱い、`collector_runs.error_message` に権限確認が必要な旨を記録します。
+実行前にOpenAI側でspend cap / budget limitを設定してください。usage / costs 系APIはOrganization Admin API keyが必要です。OpenAI管理APIから `401` / `403` が返った場合、このアプリではOpenAI管理APIエラーとして扱い、`collector_runs.error_message` に権限確認が必要な旨を記録します。
 
 ### Gemini Collector
 
-Gemini Collectorはusage / billing / quota / rate limit / project usage などの管理情報取得専用です。生成API、画像生成、動画生成、音声生成、grounding/search/tool系の生成処理は呼びません。
+Gemini Collectorはusage(Cloud Monitoring)・quota(Service Usage/Consumer Quota)の管理情報取得専用です。生成API、画像生成、動画生成、音声生成、grounding/search/tool系の生成処理は呼びません。
 
-実行には以下のいずれかの認証情報が必要です。
+実行には**OAuth2アクセストークン**(またはApplication Default Credentials)とGoogle CloudプロジェクトIDが必要です。
 
 ```text
 ENABLE_VENDOR_COLLECTORS=true
 ENABLE_GEMINI_COLLECTOR=true
-GEMINI_API_KEY=...
-# または
 GOOGLE_CLOUD_ACCESS_TOKEN=...
 GOOGLE_CLOUD_PROJECT=...
 ALLOW_PAID_MODEL_CALLS=false
 ```
 
+**`GEMINI_API_KEY`(Google AI Studioで発行するAPIキー)だけでは実行できません。** Cloud Monitoring APIおよびService Usage/Consumer Quota APIは公式ドキュメント上、OAuth2/ADCのみを認証方式として受け付け、APIキー認証には対応していません。この制約はGoogle公式ドキュメントで確認済みです(詳細は [docs/vendor-collector-production-readiness.md](docs/vendor-collector-production-readiness.md))。`GEMINI_API_KEY`のみが設定されている場合、Collectorは「未設定」として扱い、400エラーを返します(空の結果を返して黙って成功したように見せることはしません)。
+
 まずは `POST /api/collect/gemini?dry_run=true` を推奨します。`dry_run=true` は `usage_records` に保存しない確認モードですが、管理情報取得APIへの外部GET通信は発生します。外部通信自体を避けたい場合はCollectorを実行しないでください。
 
-初回実装では取得結果の正規化と `collector_runs` への記録までを行い、`usage_records` への保存はまだ行いません。そのため `records_saved=0` です。Google Cloud側でもbudget / quota / alertを設定してください。Gemini Web版の残り利用枠は取得対象外です。
+Google Cloud側でもbudget / quota / alertを設定してください。Cloud Billing Budget APIによるbudget読み取りは公式に存在しますが(OAuth2/ADCのみ、APIキー不可)、このCollectorはまだ実装していません。Gemini Web版の残り利用枠は取得対象外です。
 
 ### Claude Collector
 
-Claude Collectorはusage / billing / costs / limits / organization usage / workspace usage などの管理情報取得専用です。Messages API、streaming Messages、tool use付きMessages、prompt cachingを含むモデル推論は呼びません。
+Claude Collectorはusage / cost(Anthropic Organization Usage & Cost Admin API)の管理情報取得専用です。Messages API、streaming Messages、tool use付きMessages、prompt cachingを含むモデル推論は呼びません。
 
 実行には以下の認証情報が必要です。
 
@@ -186,11 +190,11 @@ ANTHROPIC_API_KEY=...
 ALLOW_PAID_MODEL_CALLS=false
 ```
 
-必要に応じて `ANTHROPIC_ORGANIZATION_ID` / `ANTHROPIC_WORKSPACE_ID` も設定できます。まずは `POST /api/collect/claude?dry_run=true` を推奨します。`dry_run=true` は `usage_records` に保存しない確認モードですが、管理情報取得APIへの外部GET通信は発生します。外部通信自体を避けたい場合はCollectorを実行しないでください。
+`ANTHROPIC_API_KEY` は**organization Admin API key**(プレフィックス `sk-ant-admin01-`)である必要があります。通常のAPIキーではusage/cost管理APIにアクセスできません。必要に応じて `ANTHROPIC_ORGANIZATION_ID` / `ANTHROPIC_WORKSPACE_ID` も設定できます(取得結果のグルーピング用で、Admin keyが読み取れる範囲自体は変わりません)。まずは `POST /api/collect/claude?dry_run=true` を推奨します。
 
-初回実装では取得結果の正規化と `collector_runs` への記録までを行い、`usage_records` への保存はまだ行いません。そのため `records_saved=0` です。Anthropic側でもspend limit / usage limitを設定してください。Claude Web版の残り利用枠は取得対象外です。
+Anthropic側でもspend limit / usage limitを設定してください。ただしspend limit(budget)の読み取りAPIはClaude Enterprise専用と公式に明記されており、Claude Console/Platform組織では利用できないため、このCollectorはbudget値を取得しません。Claude Web版の残り利用枠は取得対象外です。
 
-Claude Codeの5時間枠・7日枠rate limit(CLI自動取得およびClaude Desktop Cloud手動fallback)については [docs/claude-code-usage-bridge.md](docs/claude-code-usage-bridge.md) を参照してください。
+Claude Codeの5時間枠・7日枠rate limit(CLI自動取得およびClaude Desktop Cloud手動fallback)は、Anthropic公式ドキュメント上もこのUsage & Cost Admin APIとは別系統(Claude.aiサブスクリプションのセッション制限)であることを確認済みで、混同していません。詳細は [docs/claude-code-usage-bridge.md](docs/claude-code-usage-bridge.md) を参照してください。
 
 ### Collector normalized records and save policy
 
@@ -201,9 +205,14 @@ vendor
 service_provider
 model_name
 limit_type
+metric_kind
 used_value
 unit
 recorded_at
+period_start
+period_end
+bucket_width
+source_record_id
 source_type
 project_id
 organization_id
@@ -212,23 +221,22 @@ raw_label
 metadata
 ```
 
-`vendor` は `openai` / `gemini` / `claude`、`source_type` は `api_openai_management` / `api_gemini_management` / `api_claude_management` を使います。`used_value` はfloat、`recorded_at` はISO形式文字列です。
+`vendor` は `openai` / `gemini` / `claude`、`source_type` は `api_openai_management` / `api_gemini_management` / `api_claude_management` を使います。`metric_kind` は `usage` / `cost` / `quota` / `budget` のいずれかで、`unit` は公式レスポンスで確認できた値だけに制限された固定語彙です(`requests` / `input_tokens` / `output_tokens` / `cache_read_tokens` / `cache_creation_tokens` / `total_tokens` / `usd` / `quota_count`)。`unit`は対応する`metric_kind`以外では使えません(例: `usd`は`cost`/`budget`専用)。`period_start` / `period_end` はtimezone-aware datetimeで、`period_start < period_end` を必須とします。`used_value` はfloat、`recorded_at` は表示用のISO形式文字列です。
 
 次工程の保存方針は以下です。
 
-- `dry_run=true` は `usage_records` に保存しない。
-- `dry_run=false` のみ保存対象にする。
-- 保存時は `vendor + project_id/workspace_id + model_name + limit_type + unit` の組み合わせで既存の `limit` を探す。
-- 該当する `service` / `limit` がなければ、`account_type=api` のservice / limitを自動作成するか、手入力待ちとして扱う。
-- 同じ `vendor / model_name / limit_type / recorded_at` の重複保存を防ぐ。
-- `records_saved` には実際に保存した件数を入れる。
+- `dry_run=true` は `usage_records` に保存しない(ただしvalidationとimport判定自体は実行し、結果を返す)。
+- `dry_run=false` のみ実際に保存する。
+- `metric_kind` が `usage` / `cost` の場合のみ保存対象。`quota` / `budget` は(将来Limitへの反映方法を別途設計するまで)`usage_records` へ保存しない。
+- 保存時は `vendor + source_type + project_id/organization_id/workspace_id + model_name + limit_type + unit` の組み合わせで既存の `limit` を探す。
+- 該当する `service` / `limit` がなければ、`account_type=api` のservice / limitを自動作成する。
+- 同一identity(後述)で値が変わっていた場合は、新規行を追加せず既存の`usage_records`行を更新する。
+- `records_saved` には実際に保存(新規作成+更新)した件数を入れる。
 - 取得元は `source_type` で区別する。
-
-この段階では保存仕様の固定とバリデーションまでで、`usage_records` への保存実装はまだ行いません。
 
 ### Collector import behavior
 
-`dry_run=false` のCollector実行では、正規化済みレコードを `usage_records` に保存します。`dry_run=true` は確認モードのため保存しません。
+`dry_run=false` のCollector実行では、正規化済みレコードを `usage_records` に保存します。`dry_run=true` は確認モードのため書き込みませんが、同じvalidation・import判定ロジックを通し、`POST /api/collect/{vendor}` のレスポンス `outcomes` へ理由付きで結果を返します(`imported` / `updated` / `duplicate` / `unsupported_metric_kind` / `dry_run` / `invalid_record`)。`outcomes` はDBへは保存されません(集計値の`records_found`/`records_saved`のみ`collector_runs`へ保存)。
 
 保存時にAPI用の `service` が存在しない場合は自動作成します。
 
@@ -240,7 +248,7 @@ Claude  -> Claude API / provider=Anthropic / account_type=api
 
 対応する `limit` が存在しない場合も、`model_name + limit_type + unit + source_type` をもとにAPI用limitを自動作成します。作成されるlimitは `max_value=null`、`reset_interval_type=days`、`reset_interval_value=1` です。
 
-重複保存は `collector_imports.import_key` で防ぎます。import_keyは `vendor / source_type / project_id / organization_id / workspace_id / model_name / limit_type / unit / recorded_at` から作成します。`records_saved` は重複を除いた新規保存件数です。
+重複防止・更新判定は `collector_imports.import_key` で行います。import_keyは `vendor / source_type / project_id / organization_id / workspace_id / model_name / limit_type / metric_kind / unit / period_start / period_end` から作成します(`used_value`は含みません)。同一import_keyの既存レコードが見つかった場合、値が同じなら何もせず(`duplicate`)、値が異なれば既存の`usage_records`行を更新します(`updated`。新規行の追加はしません)。`records_saved` は新規作成+更新を合わせた件数です。
 
 これはChatGPT / Gemini / Claude Web版の残量保存ではなく、OpenAI / Gemini / Claude APIの利用履歴保存です。
 
