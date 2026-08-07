@@ -64,6 +64,81 @@ def build_import_key(record: CollectorNormalizedRecord | dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+# Pre-existing collector_imports rows (written before metric_kind/period_start/
+# period_end/canonical units were introduced) were keyed on:
+#   vendor, source_type, project_id, organization_id, workspace_id,
+#   model_name, limit_type, unit, recorded_at
+# — with `unit` a free string rather than today's canonical vocabulary. Only
+# the unit representation actually changed for token-count rows (both
+# input_tokens and output_tokens previously shared the generic unit
+# "tokens"); "requests" and currency codes like "usd" were already identical
+# to their current canonical form. cache_read_tokens/cache_creation_tokens/
+# total_tokens/quota_count have no legacy equivalent — they did not exist
+# before this PR — so there is nothing to look up for them.
+_LEGACY_UNIT_ALIASES: dict[str, tuple[str, ...]] = {
+    "input_tokens": ("tokens",),
+    "output_tokens": ("tokens",),
+    "requests": ("requests",),
+    "usd": ("usd",),
+}
+
+
+def _legacy_recorded_at_candidates(record: CollectorNormalizedRecord) -> list[str]:
+    # The legacy scheme's `recorded_at` was always derived from the bucket's
+    # end-of-window value, but exactly how differed by vendor (some
+    # reformatted through app_tz(), one passed the raw API string through
+    # unchanged) — there is no single byte-exact reconstruction available
+    # without re-running the old collector code. Rather than guess wrong and
+    # miss a real match, try every representation an old row could plausibly
+    # have used; the SHA256 comparison is still exact, so this only ever
+    # widens what CAN be found — it can never cause a false match.
+    seen: list[str] = []
+
+    def add(value: str | None) -> None:
+        if value and value not in seen:
+            seen.append(value)
+
+    add(record.recorded_at)
+    add(record.period_end.isoformat())
+    try:
+        add(record.period_end.astimezone(app_tz()).isoformat())
+    except (OverflowError, OSError):
+        pass
+    return seen
+
+
+def build_legacy_import_key_candidates(record: CollectorNormalizedRecord) -> list[str]:
+    """Compute the import_key(s) the same record could have hashed to under
+    the pre-metric_kind/period legacy scheme, so a pre-existing row can be
+    found and re-keyed instead of silently duplicated. Best-effort: only
+    ever used for lookup (never for writing — new writes always use
+    build_import_key's current scheme), and an exact SHA256 match is still
+    required, so a wrong/unmatched guess can only miss a real legacy row
+    (falling back to creating a new one, i.e. today's behavior), never
+    misattribute a record to the wrong existing row."""
+    candidates: list[str] = []
+    seen_keys: set[str] = set()
+    for legacy_unit in _LEGACY_UNIT_ALIASES.get(record.unit, ()):
+        for legacy_recorded_at in _legacy_recorded_at_candidates(record):
+            payload = {
+                "vendor": record.vendor,
+                "source_type": record.source_type,
+                "project_id": record.project_id,
+                "organization_id": record.organization_id,
+                "workspace_id": record.workspace_id,
+                "model_name": record.model_name,
+                "limit_type": record.limit_type,
+                "unit": legacy_unit,
+                "recorded_at": legacy_recorded_at,
+            }
+            raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if key not in seen_keys:
+                seen_keys.add(key)
+                candidates.append(key)
+    return candidates
+
+
 def get_or_create_api_service(db: Session, record: CollectorNormalizedRecord) -> models.Service:
     mapping = SERVICE_BY_VENDOR[record.vendor]
     service = db.scalar(
@@ -199,13 +274,36 @@ def _plan_and_apply(
             existing = db.scalar(
                 select(models.CollectorImport).where(models.CollectorImport.import_key == import_key)
             )
+            matched_legacy_key: str | None = None
+            if existing is None:
+                # New-key match takes precedence and is always checked first
+                # (above) — legacy candidates are only ever consulted when no
+                # current-scheme row exists, so a legacy match can never
+                # compete with or override a real new-scheme row.
+                for legacy_key in build_legacy_import_key_candidates(record):
+                    legacy_match = db.scalar(
+                        select(models.CollectorImport).where(models.CollectorImport.import_key == legacy_key)
+                    )
+                    if legacy_match is not None:
+                        existing = legacy_match
+                        matched_legacy_key = legacy_key
+                        break
 
             if existing is not None:
                 existing_usage_record = db.get(models.UsageRecord, existing.usage_record_id)
                 same_value = existing_usage_record is not None and _values_equal(
                     existing_usage_record.used_value, record.used_value
                 )
+                legacy_detail = (
+                    "matched a legacy import key; re-keyed to the current scheme"
+                    if matched_legacy_key is not None
+                    else None
+                )
                 if same_value:
+                    if persist and matched_legacy_key is not None:
+                        existing.import_key = import_key
+                        db.add(existing)
+                        db.flush()
                     result.outcomes.append(
                         ImportOutcome(
                             reason="duplicate",
@@ -213,6 +311,7 @@ def _plan_and_apply(
                             model_name=record.model_name,
                             limit_type=record.limit_type,
                             metric_kind=record.metric_kind,
+                            detail=legacy_detail,
                         )
                     )
                     continue
@@ -224,13 +323,16 @@ def _plan_and_apply(
                             model_name=record.model_name,
                             limit_type=record.limit_type,
                             metric_kind=record.metric_kind,
-                            detail="would update the existing record with a revised value",
+                            detail=legacy_detail or "would update the existing record with a revised value",
                         )
                     )
                     continue
                 existing_usage_record.used_value = record.used_value
                 existing_usage_record.recorded_at = recorded_at
                 existing_usage_record.limit.updated_at = now_local()
+                if matched_legacy_key is not None:
+                    existing.import_key = import_key
+                    db.add(existing)
                 db.add(existing_usage_record)
                 db.flush()
                 result.records_saved += 1
@@ -241,6 +343,7 @@ def _plan_and_apply(
                         model_name=record.model_name,
                         limit_type=record.limit_type,
                         metric_kind=record.metric_kind,
+                        detail=legacy_detail,
                     )
                 )
                 continue
