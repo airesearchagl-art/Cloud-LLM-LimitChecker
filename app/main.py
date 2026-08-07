@@ -322,15 +322,19 @@ def run_gemini_collector(db: Session, run: models.CollectorRun, dry_run: bool) -
     access_token = os.getenv("GOOGLE_CLOUD_ACCESS_TOKEN", "").strip() or None
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or os.getenv("GEMINI_PROJECT_ID", "").strip() or None
     # GEMINI_API_KEY is intentionally never read here: Cloud Monitoring and
-    # Service Usage (the only APIs this collector calls) require an OAuth2/ADC
-    # access token, never an API key — see
-    # app/collectors/gemini_collector.py and
+    # Service Usage (the only APIs this collector calls) require OAuth2
+    # credentials, never an API key. This app only accepts a static,
+    # caller-supplied OAuth2 bearer access token (GOOGLE_CLOUD_ACCESS_TOKEN)
+    # — it does not implement Application Default Credentials discovery or
+    # token refresh. See app/collectors/gemini_collector.py and
     # docs/vendor-collector-production-readiness.md ("Gemini Security").
     if not access_token or not project_id:
         message = (
-            "Google Cloud OAuth2/ADC access token (GOOGLE_CLOUD_ACCESS_TOKEN) and "
+            "A Google Cloud OAuth2 access token (GOOGLE_CLOUD_ACCESS_TOKEN) and "
             "project (GOOGLE_CLOUD_PROJECT or GEMINI_PROJECT_ID) are not configured. "
-            "A Gemini API key alone cannot authenticate to the management APIs."
+            "A Gemini API key alone cannot authenticate to the management APIs, and "
+            "Application Default Credentials discovery is not implemented — a static "
+            "access token must be supplied directly."
         )
         crud.finish_collector_run_blocked(db, run.id, message)
         raise HTTPException(status_code=400, detail=message)

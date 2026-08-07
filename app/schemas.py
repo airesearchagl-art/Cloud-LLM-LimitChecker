@@ -336,7 +336,12 @@ class CollectorRunRead(BaseModel):
 class CollectorPreflightStatusRead(BaseModel):
     vendor: str
     configured: bool
+    configuration_complete: bool
     auth_mode: str
+    live_validation_required: bool
+    # Kept for response-shape backward compatibility; always false — see
+    # app/collectors/preflight.py's module docstring for why a network-free
+    # check can never honestly report true.
     production_ready: bool
     missing_requirements: list[str]
     notes: list[str]

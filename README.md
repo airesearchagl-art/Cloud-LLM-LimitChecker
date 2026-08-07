@@ -161,7 +161,7 @@ OpenAI側でもspend cap / budget limitを設定してください。ただし�
 
 Gemini Collectorはusage(Cloud Monitoring)・quota(Service Usage/Consumer Quota)の管理情報取得専用です。生成API、画像生成、動画生成、音声生成、grounding/search/tool系の生成処理は呼びません。
 
-実行には**OAuth2アクセストークン**(またはApplication Default Credentials)とGoogle CloudプロジェクトIDが必要です。
+実行には**OAuth2アクセストークン**とGoogle CloudプロジェクトIDが必要です。`GOOGLE_CLOUD_ACCESS_TOKEN`に設定したトークンをそのままBearerトークンとして使います。
 
 ```text
 ENABLE_VENDOR_COLLECTORS=true
@@ -170,6 +170,8 @@ GOOGLE_CLOUD_ACCESS_TOKEN=...
 GOOGLE_CLOUD_PROJECT=...
 ALLOW_PAID_MODEL_CALLS=false
 ```
+
+**Application Default Credentials(ADC)の自動探索・トークン更新は実装していません。** このCollectorが受け付けるのは静的なOAuth2アクセストークン(`GOOGLE_CLOUD_ACCESS_TOKEN`)のみです。トークンの取得・有効期限管理・更新は利用者側の責任です(例: `gcloud auth print-access-token` を手動または外部スクリプトで実行し、都度`.env`を更新するなど)。ADCの正式対応(google-authライブラリ等、新規dependencyの追加を伴う)は今回のPRでは行わず、将来候補として記録します。
 
 **`GEMINI_API_KEY`(Google AI Studioで発行するAPIキー)だけでは実行できません。** Cloud Monitoring APIおよびService Usage/Consumer Quota APIは公式ドキュメント上、OAuth2/ADCのみを認証方式として受け付け、APIキー認証には対応していません。この制約はGoogle公式ドキュメントで確認済みです(詳細は [docs/vendor-collector-production-readiness.md](docs/vendor-collector-production-readiness.md))。`GEMINI_API_KEY`のみが設定されている場合、Collectorは「未設定」として扱い、400エラーを返します(空の結果を返して黙って成功したように見せることはしません)。
 
