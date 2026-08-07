@@ -1,4 +1,5 @@
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -6,8 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from app.collectors.types import CollectorNormalizedRecord, normalized_record_to_dict
-from app.time_utils import app_tz, now_local
+from app.time_utils import now_local
 
 
 class OpenAICollectorConfigError(RuntimeError):
@@ -24,7 +24,7 @@ class OpenAIManagementNetworkError(RuntimeError):
 
 # Maximum pages fetched per endpoint per collect() call. Bounds worst-case
 # request count if a vendor response's next_page cursor is malformed/looping;
-# paired with the seen-pages guard in _get_paginated_json.
+# paired with the seen-pages guard in _get_paginated_data.
 _MAX_PAGES = 50
 
 
@@ -75,7 +75,9 @@ class OpenAIUsageCostCollector:
         seen_pages: set[str] = set()
         for _ in range(_MAX_PAGES):
             payload = self._get_json(path, page_params)
-            all_data.extend(payload.get("data", []))
+            data = payload.get("data")
+            if isinstance(data, list):
+                all_data.extend(bucket for bucket in data if isinstance(bucket, dict))
             next_page = payload.get("next_page")
             if not next_page or next_page in seen_pages:
                 break
@@ -97,16 +99,22 @@ class OpenAIUsageCostCollector:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            detail = self._http_error_message(exc)
-            raise OpenAIManagementAPIError(detail) from exc
-        except urllib.error.URLError as exc:
-            raise OpenAIManagementNetworkError(f"OpenAI management API network error: {exc.reason}") from exc
+            raise OpenAIManagementAPIError(self._http_error_message(exc)) from exc
+        except urllib.error.URLError:
+            # Never include exc.reason — it can carry proxy/DNS/socket detail
+            # from the local network stack that has no reason to be exposed
+            # in an API response or collector_run.error_message.
+            raise OpenAIManagementNetworkError("OpenAI management API network error")
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
             raise OpenAIManagementAPIError("OpenAI management API returned invalid JSON") from exc
 
     def _http_error_message(self, exc: urllib.error.HTTPError) -> str:
+        # Never echo the response body, request URL, or headers — a proxy or
+        # a verbose vendor error page could plausibly include auth material
+        # or otherwise sensitive detail. Only a fixed, generic message per
+        # status code.
         if exc.code in {401, 403}:
             return (
                 f"OpenAI management API returned {exc.code}. "
@@ -114,16 +122,18 @@ class OpenAIUsageCostCollector:
             )
         if exc.code == 429:
             return "OpenAI management API rate limited the request (429)."
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        if len(detail) > 240:
-            detail = f"{detail[:240]}..."
-        return f"OpenAI management API returned {exc.code}: {detail}"
+        return f"OpenAI management API returned {exc.code}."
 
     def _normalize_usage(self, buckets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for bucket in buckets:
-            recorded_at, period_start, period_end = self._bucket_window(bucket)
-            for result in bucket.get("results", []):
+            period_start = bucket.get("start_time")
+            period_end = bucket.get("end_time")
+            recorded_at = self._recorded_at_label(bucket)
+            results = bucket.get("results")
+            if not isinstance(results, list):
+                continue
+            for result in results:
                 if not isinstance(result, dict):
                     continue
                 model_name = result.get("model") or "openai_api"
@@ -134,7 +144,7 @@ class OpenAIUsageCostCollector:
                     ("cache_read_tokens", result.get("input_cached_tokens")),
                     ("requests", result.get("num_model_requests")),
                 ):
-                    value = self._safe_float(raw_value)
+                    value = self._safe_finite_float(raw_value)
                     if value:
                         rows.append(
                             self._row(
@@ -154,14 +164,19 @@ class OpenAIUsageCostCollector:
     def _normalize_costs(self, buckets: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for bucket in buckets:
-            recorded_at, period_start, period_end = self._bucket_window(bucket)
-            for result in bucket.get("results", []):
+            period_start = bucket.get("start_time")
+            period_end = bucket.get("end_time")
+            recorded_at = self._recorded_at_label(bucket)
+            results = bucket.get("results")
+            if not isinstance(results, list):
+                continue
+            for result in results:
                 if not isinstance(result, dict):
                     continue
                 amount = result.get("amount")
                 if not isinstance(amount, dict):
                     continue
-                value = self._safe_float(amount.get("value"))
+                value = self._safe_finite_float(amount.get("value"))
                 # OpenAI's Costs API is USD-only today; a non-usd currency in
                 # the response is unexpected and treated as unparseable rather
                 # than silently mislabeled.
@@ -185,29 +200,23 @@ class OpenAIUsageCostCollector:
         return rows
 
     @staticmethod
-    def _safe_float(value: Any) -> float:
+    def _recorded_at_label(bucket: dict[str, Any]) -> str:
+        value = bucket.get("end_time")
+        if value is None:
+            value = bucket.get("start_time")
+        return str(value) if value is not None else ""
+
+    @staticmethod
+    def _safe_finite_float(value: Any) -> float:
         if value is None:
             return 0.0
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             return 0.0
-
-    def _bucket_window(self, bucket: dict[str, Any]) -> tuple[str, datetime, datetime]:
-        start_ts = bucket.get("start_time")
-        end_ts = bucket.get("end_time")
-        if start_ts is None or end_ts is None:
-            end_dt = now_local()
-            return end_dt.isoformat(), end_dt - timedelta(days=1), end_dt
-        try:
-            period_start = datetime.fromtimestamp(int(start_ts), tz=app_tz())
-            period_end = datetime.fromtimestamp(int(end_ts), tz=app_tz())
-        except (TypeError, ValueError, OSError):
-            end_dt = now_local()
-            return end_dt.isoformat(), end_dt - timedelta(days=1), end_dt
-        if period_start >= period_end:
-            period_end = period_start + timedelta(seconds=1)
-        return period_end.isoformat(), period_start, period_end
+        if not math.isfinite(parsed):
+            return 0.0
+        return parsed
 
     def _row(
         self,
@@ -218,25 +227,32 @@ class OpenAIUsageCostCollector:
         used_value: float,
         unit: str,
         recorded_at: str,
-        period_start: datetime,
-        period_end: datetime,
+        period_start: Any,
+        period_end: Any,
         project_id: str | None,
     ) -> dict[str, Any]:
-        return normalized_record_to_dict(
-            CollectorNormalizedRecord(
-                vendor="openai",
-                service_provider="OpenAI",
-                model_name=model_name,
-                limit_type=limit_type,
-                metric_kind=metric_kind,
-                used_value=used_value,
-                unit=unit,
-                recorded_at=recorded_at,
-                period_start=period_start,
-                period_end=period_end,
-                bucket_width="1d",
-                source_type="api_openai_management",
-                project_id=project_id,
-                metadata={"project_id": project_id},
-            )
-        )
+        # Returns a plain dict, not a validated CollectorNormalizedRecord —
+        # period_start/period_end (unix timestamps per the official response
+        # shape, or None if the bucket omitted them) are passed through
+        # exactly as received, never fabricated or corrected here. A
+        # missing/unparseable/reversed period is left for
+        # app.collectors.types.CollectorNormalizedRecord's own validation to
+        # reject downstream (surfaced as an "invalid_record" import outcome
+        # for dry_run, or the existing whole-batch rollback for a real
+        # import).
+        return {
+            "vendor": "openai",
+            "service_provider": "OpenAI",
+            "model_name": model_name,
+            "limit_type": limit_type,
+            "metric_kind": metric_kind,
+            "used_value": used_value,
+            "unit": unit,
+            "recorded_at": recorded_at,
+            "period_start": period_start,
+            "period_end": period_end,
+            "bucket_width": "1d",
+            "source_type": "api_openai_management",
+            "project_id": project_id,
+            "metadata": {"project_id": project_id},
+        }

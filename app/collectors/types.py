@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -89,6 +90,18 @@ class CollectorNormalizedRecord(BaseModel):
     def require_timezone_aware_period(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("period_start/period_end must be timezone-aware")
+        return value
+
+    @field_validator("used_value")
+    @classmethod
+    def require_finite_used_value(cls, value: float) -> float:
+        # A vendor response containing "NaN"/"Infinity"/"-Infinity" (valid
+        # input to float()) must never be treated as a real usage/cost
+        # number — silently importing it would corrupt aggregates and
+        # comparisons (e.g. NaN != NaN breaks the revision-update no-op
+        # check in app/collectors/importer.py).
+        if not math.isfinite(value):
+            raise ValueError("used_value must be a finite number (not NaN or Infinity)")
         return value
 
     @model_validator(mode="after")
