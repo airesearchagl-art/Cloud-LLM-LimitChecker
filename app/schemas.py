@@ -302,6 +302,17 @@ class CodexRateLimitsSnapshot(BaseModel):
     last_auto_refresh_error_type: str | None
 
 
+class CollectorImportOutcomeRead(BaseModel):
+    reason: str
+    vendor: str
+    model_name: str
+    limit_type: str
+    metric_kind: str | None = None
+    detail: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class CollectorRunRead(BaseModel):
     id: int
     vendor: str
@@ -313,5 +324,26 @@ class CollectorRunRead(BaseModel):
     records_saved: int
     error_message: str | None
     created_at: datetime
+    # Per-record import decisions for this run. Not persisted anywhere (only
+    # the aggregate records_found/records_saved counts above are stored on
+    # CollectorRun) — populated only on the direct POST /api/collect/{vendor}
+    # response; always null when read back later via GET /api/collector-runs.
+    outcomes: list[CollectorImportOutcomeRead] | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class CollectorPreflightStatusRead(BaseModel):
+    vendor: str
+    configured: bool
+    configuration_complete: bool
+    auth_mode: str
+    live_validation_required: bool
+    # Kept for response-shape backward compatibility; always false — see
+    # app/collectors/preflight.py's module docstring for why a network-free
+    # check can never honestly report true.
+    production_ready: bool
+    missing_requirements: list[str]
+    notes: list[str]
 
     model_config = {"from_attributes": True}
