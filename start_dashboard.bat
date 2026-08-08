@@ -4,14 +4,22 @@ setlocal
 cd /d "%~dp0"
 
 echo ==========================================
-echo Cloud LLM Limit Checker ã‚’èµ·å‹•ã—ã¾ã™
+echo Cloud LLM Limit Checker ‚ğ‹N“®‚µ‚Ü‚·
 echo ==========================================
 echo.
 
+powershell -NoProfile -WindowStyle Hidden -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8001/api/health' -TimeoutSec 2; $json = $r.Content | ConvertFrom-Json; if ($r.StatusCode -eq 200 -and $json.status -eq 'ok') { exit 0 } else { exit 1 } } catch { exit 1 }"
+if %ERRORLEVEL% EQU 0 (
+    echo Cloud LLM Limit Checker ‚Í‚·‚Å‚É‹N“®‚µ‚Ä‚¢‚Ü‚·B
+    echo ƒuƒ‰ƒEƒU‚Åƒ_ƒbƒVƒ…ƒ{[ƒh‚ğŠJ‚«‚Ü‚·: http://127.0.0.1:8001
+    start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Process 'http://127.0.0.1:8001'"
+    exit /b 0
+)
+
 if not exist ".venv\Scripts\python.exe" (
-    echo [ERROR] .venv ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
+    echo [ERROR] .venv ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
     echo.
-    echo åˆå›ã‚»ãƒƒãƒˆã‚¢ãƒƒãƒ—ã‚’å®Ÿè¡Œã—ã¦ãã ã•ã„ï¼ˆREADME.md ã® Setup / Windows Standard Commands ã‚’å‚ç…§ï¼‰:
+    echo ‰‰ñƒZƒbƒgƒAƒbƒv‚ğÀs‚µ‚Ä‚­‚¾‚³‚¢iREADME.md ‚Ì Setup / Windows Standard Commands ‚ğQÆj:
     echo   python -m venv .venv
     echo   .venv\Scripts\python.exe -m pip install -r requirements.txt
     echo.
@@ -20,14 +28,14 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 if not exist ".env" (
-    echo [WARNING] .env ãŒè¦‹ã¤ã‹ã‚Šã¾ã›ã‚“ã€‚
-    echo å¿…è¦ã«å¿œã˜ã¦ .env.example ã‹ã‚‰ä½œæˆã—ã¦ãã ã•ã„ã€‚
+    echo [WARNING] .env ‚ªŒ©‚Â‚©‚è‚Ü‚¹‚ñB
+    echo •K—v‚É‰‚¶‚Ä .env.example ‚©‚çì¬‚µ‚Ä‚­‚¾‚³‚¢B
     echo.
 )
 
 echo URL: http://127.0.0.1:8001
-echo åœæ­¢: ã“ã®ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã§ Ctrl+C ã‚’æŠ¼ã—ã¦ãã ã•ã„
-echo ã‚µãƒ¼ãƒãƒ¼èµ·å‹•ã«å¤±æ•—ã—ãŸå ´åˆã¯ã€ä¸‹ã«è¡¨ç¤ºã•ã‚Œã‚‹ãƒ­ã‚°ã‚’ç¢ºèªã—ã¦ãã ã•ã„ã€‚
+echo ’â~: ‚±‚ÌƒEƒBƒ“ƒhƒE‚Å Ctrl+C ‚ğ‰Ÿ‚µ‚Ä‚­‚¾‚³‚¢
+echo ƒT[ƒo[‹N“®‚É¸”s‚µ‚½ê‡‚ÍA‰º‚É•\¦‚³‚ê‚éƒƒO‚ğŠm”F‚µ‚Ä‚­‚¾‚³‚¢B
 echo.
 
 start "" powershell -NoProfile -WindowStyle Hidden -Command "$deadline = (Get-Date).AddSeconds(20); while ((Get-Date) -lt $deadline) { try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8001/api/health' -TimeoutSec 2; if ($r.StatusCode -eq 200) { break } } catch {}; Start-Sleep -Milliseconds 500 }; Start-Process 'http://127.0.0.1:8001'"
