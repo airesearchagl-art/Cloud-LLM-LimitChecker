@@ -382,6 +382,97 @@ function renderGithubRateLimit(data) {
   document.querySelector("#githubRateLimitResult").innerHTML = githubRateLimitHtml(data);
 }
 
+function githubActionsBillingStatusClass(status) {
+  if (status === "overage" || status === "exhausted") return "github-status-exhausted";
+  if (status === "warning") return "github-status-warning";
+  if (status === "plan_unknown") return "github-status-error";
+  if (status === "normal") return "github-status-normal";
+  return "";
+}
+
+const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
+  normal: "Normal",
+  warning: "Warning",
+  exhausted: "Exhausted",
+  overage: "Overage",
+  plan_unknown: "Plan不明",
+};
+
+// GitHub API Rate Limit(APIリクエスト枠)とは別概念であることを明示するため、
+// 別関数・別カードとして完全に独立させる。数値が不明な場合は0と偽装せず「—」を表示する。
+function githubActionsBillingHtml(data) {
+  if (!data) {
+    return `<p class="muted">状態: 未取得</p>`;
+  }
+
+  if (data.error) {
+    const message = escapeHtml(data.error.user_message || "取得に失敗しました");
+    const lastKnownHtml = data.last_known
+      ? `<p class="muted">直近の取得は失敗しました。以下は${escapeHtml(fmtGithubDate(data.last_known.collected_at))}時点の古い情報（未更新）です。</p>${githubActionsBillingCardHtml(data.last_known, true)}`
+      : "";
+    return `<div class="github-error">${message}</div>${lastKnownHtml}`;
+  }
+
+  if (!data.fetched) {
+    return `<p class="muted">状態: 未取得</p>`;
+  }
+
+  return githubActionsBillingCardHtml(data, false);
+}
+
+function githubActionsBillingCardHtml(data, isStale) {
+  const statusLabel = GITHUB_ACTIONS_BILLING_STATUS_LABEL[data.status] || data.status || "不明";
+  const statusClass = githubActionsBillingStatusClass(data.status);
+  const staleNoticeHtml = isStale ? `<p class="muted">古い情報（未更新）</p>` : "";
+
+  if (data.status === "plan_unknown" || data.included_minutes === null || data.included_minutes === undefined) {
+    return `
+      ${staleNoticeHtml}
+      <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — ${escapeHtml(statusLabel)}</div>
+      <p class="form-note">Planを安全に認識できないため、月間枠を計算していません（used_included_minutes等は「—」表示）。現在のGitHub credentialに"Plan: read"権限（"user" scope）があるか確認してください。</p>
+      <div class="github-resource-cards">
+        <div class="github-resource-card">
+          <div class="github-resource-name">GitHub Actions</div>
+          <div>Used: —</div>
+          <div>Remaining: —</div>
+          <div>Monthly allowance: —</div>
+        </div>
+      </div>`;
+  }
+
+  const usedText = fmtNumber(data.used_included_minutes);
+  const includedText = fmtNumber(data.included_minutes);
+  const remainingText = fmtNumber(data.remaining_minutes);
+  const percentText = fmtNumber(data.usage_percentage);
+  const overageHtml =
+    data.overage_minutes && data.overage_minutes > 0
+      ? `<div class="github-error">Overage: ${fmtNumber(data.overage_minutes)} min（included枠を超過し課金対象）</div>`
+      : "";
+  const nonIncludedHtml =
+    data.paid_non_included_minutes && data.paid_non_included_minutes > 0
+      ? `<div class="muted">Non-included paid minutes (larger runner等): ${fmtNumber(data.paid_non_included_minutes)} min</div>`
+      : "";
+
+  return `
+    ${staleNoticeHtml}
+    <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — ${escapeHtml(statusLabel)}</div>
+    <div class="github-resource-cards">
+      <div class="github-resource-card">
+        <div class="github-resource-name">GitHub Actions</div>
+        <div>Used: ${usedText} / ${includedText} min</div>
+        <div>Remaining: ${remainingText} min</div>
+        <div>${percentText}% used</div>
+      </div>
+    </div>
+    ${overageHtml}
+    ${nonIncludedHtml}
+    <p class="form-note">対象月: ${escapeHtml(String(data.billing_year))}-${String(data.billing_month).padStart(2, "0")} ／ 取得元: ${escapeHtml(data.source || "-")} ／ 最終取得: ${escapeHtml(fmtGithubDate(data.collected_at))}</p>`;
+}
+
+function renderGithubActionsBilling(data) {
+  document.querySelector("#githubActionsBillingResult").innerHTML = githubActionsBillingHtml(data);
+}
+
 function applyFiltersAndSort(rows) {
   const serviceText = document.querySelector("#filterService").value.trim().toLowerCase();
   const accountType = document.querySelector("#filterAccountType").value;
@@ -414,6 +505,7 @@ async function loadAll() {
     history,
     collectorRuns,
     githubRateLimit,
+    githubActionsBilling,
     claudeDesktopCloudUsage,
     codexUsage,
     codexRateLimits,
@@ -425,6 +517,7 @@ async function loadAll() {
     api("/api/usage-records"),
     api("/api/collector-runs"),
     api("/api/github-rate-limit"),
+    api("/api/github-actions-billing"),
     api("/api/claude-code-usage/manual"),
     api("/api/codex-usage"),
     api("/api/codex-rate-limits"),
@@ -439,6 +532,7 @@ async function loadAll() {
   renderHistory();
   renderCollectorRuns();
   renderGithubRateLimit(githubRateLimit);
+  renderGithubActionsBilling(githubActionsBilling);
   renderClaudeDesktopCloudUsage(claudeDesktopCloudUsage);
   renderCodexUsage(codexUsage);
   renderCodexRateLimits(codexRateLimits);
@@ -475,6 +569,34 @@ function startGithubCooldownCountdown(retryAfterSeconds) {
   };
   tick();
   githubCooldownIntervalId = setInterval(tick, 1000);
+}
+
+let githubActionsBillingCooldownIntervalId = null;
+
+function stopGithubActionsBillingCooldownCountdown() {
+  if (githubActionsBillingCooldownIntervalId) {
+    clearInterval(githubActionsBillingCooldownIntervalId);
+    githubActionsBillingCooldownIntervalId = null;
+  }
+}
+
+function startGithubActionsBillingCooldownCountdown(retryAfterSeconds) {
+  stopGithubActionsBillingCooldownCountdown();
+  const button = document.querySelector("#githubActionsBillingRefresh");
+  let remaining = Math.max(0, Math.ceil(retryAfterSeconds));
+  const tick = () => {
+    if (remaining <= 0) {
+      stopGithubActionsBillingCooldownCountdown();
+      button.disabled = false;
+      button.textContent = "更新";
+      return;
+    }
+    button.disabled = true;
+    button.textContent = `更新（あと${remaining}秒）`;
+    remaining -= 1;
+  };
+  tick();
+  githubActionsBillingCooldownIntervalId = setInterval(tick, 1000);
 }
 
 // The only text ever shown for a non-429 refresh failure — deliberately never
@@ -1136,6 +1258,39 @@ function initApp() {
     }
   });
 
+  document.querySelector("#githubActionsBillingRefresh").addEventListener("click", async () => {
+    stopGithubActionsBillingCooldownCountdown();
+    const button = document.querySelector("#githubActionsBillingRefresh");
+    button.disabled = true;
+    button.textContent = "更新中...";
+    try {
+      const response = await fetch("/api/github-actions-billing/refresh", { method: "POST" });
+      if (response.status === 429) {
+        const body = await response.json().catch(() => ({}));
+        const detail = body.detail || {};
+        renderGithubActionsBilling({ error: { user_message: detail.user_message } });
+        if (detail.retry_after_seconds > 0) {
+          startGithubActionsBillingCooldownCountdown(detail.retry_after_seconds);
+        } else {
+          button.disabled = false;
+          button.textContent = "更新";
+        }
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+      const data = await response.json();
+      renderGithubActionsBilling(data);
+      button.disabled = false;
+      button.textContent = "更新";
+    } catch (error) {
+      renderGithubActionsBilling({ error: { user_message: error.message } });
+      button.disabled = false;
+      button.textContent = "更新";
+    }
+  });
+
   document.querySelector("#codexRateLimitsRefresh").addEventListener("click", async () => {
     stopCodexRateLimitsCooldownCountdown();
     const button = document.querySelector("#codexRateLimitsRefresh");
@@ -1238,6 +1393,9 @@ if (typeof module !== "undefined") {
     githubLimitedCause,
     githubLimitedBannerHtml,
     githubSecondaryRateLimitBannerHtml,
+    githubActionsBillingStatusClass,
+    githubActionsBillingHtml,
+    githubActionsBillingCardHtml,
     codexRateLimitsErrorDisplay,
     confirmClaudeDesktopCloudUsageSave,
     parseDatetimeLocalToIsoOrNull,

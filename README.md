@@ -311,6 +311,19 @@ Collector実行結果と最新履歴は画面に表示され、実行履歴は `
 - 使用履歴で手入力 / 補正 / API由来をフィルターできる。
 - ダッシュボードカードに取得元が表示される。
 
+## GitHub Actions Monthly Billing Monitor
+
+GitHub personal account（自分のアカウント）のGitHub Actions **月間** 利用枠（分）を、通常のダッシュボードと`/compact`の両方で確認できます。既存の「GitHub API Rate Limit」カード（APIリクエスト枠、1時間ごとにリセット）とは別物です。
+
+- **枠**: GitHub Free — 2,000分/月、GitHub Pro — 3,000分/月（`GET /user`の`plan.name`から判定。`free`/`pro`以外・未取得の場合はPlan不明として扱い、数値を推測しません）
+- **消費しない利用**: publicリポジトリでのstandard GitHub-hosted runnerの利用、self-hosted runnerの利用はいずれも枠を消費しません
+- **larger runner**: 常に別課金対象で、included minutes枠からは一切引かれません（`paid_non_included_minutes`として別表示）
+- **API**: `GET /users/{username}/settings/billing/usage/summary`（GitHub側で現在Public Preview）。個人アカウントのbilling usage取得には、credentialに"Plan: read"権限（fine-grained PATの"Plan"パーミッション、または`user` scope）が必要です
+- 現在のcredentialにこの権限がない場合、`permission_required`状態として安全に表示されます（`—`表示、0は表示しません）。トークンをアプリへ保存することはありません（既存のGitHub CLI認証を再利用するのみ）
+- ページ表示だけでは取得しません。「更新」ボタンを押したときだけGitHub CLI経由で取得し、以後15分間はcooldownとして再取得しません（billing情報は秒単位の更新を必要としないため）
+
+設計判断・公式ソースの詳細は[docs/github-actions-billing-monitor.md](docs/github-actions-billing-monitor.md)を参照してください。
+
 ## Remaining Work
 
 - OpenAI / Gemini / Claude の管理情報Collector実装。

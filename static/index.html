@@ -111,6 +111,19 @@
       </section>
 
       <section>
+        <div class="panel" id="githubActionsBillingPanel">
+          <div class="panel-heading">
+            <h2>GitHub Actions（月間利用枠）</h2>
+            <button id="githubActionsBillingRefresh" type="button">更新</button>
+          </div>
+          <p class="form-note">
+            GitHub API Rate Limit（APIリクエスト枠）とは別物です。こちらは月間のActions利用時間（分）の枠です。ページ表示だけでは取得せず、「更新」ボタンを押したときだけGitHub CLI経由で取得します。
+          </p>
+          <div id="githubActionsBillingResult"></div>
+        </div>
+      </section>
+
+      <section>
         <div class="panel" id="claudeDesktopCloudUsagePanel">
           <div class="panel-heading">
             <h2>Claude Desktop Cloud 使用率（手動入力）</h2>

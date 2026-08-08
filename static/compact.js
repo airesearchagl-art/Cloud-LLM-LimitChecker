@@ -413,6 +413,84 @@ function githubSectionHtml(data) {
     </div>`;
 }
 
+// GitHub API Rate Limit(APIリクエスト枠、上のgithubSectionHtml)とは別概念の、
+// 月間Actions利用時間(分)枠。別セクション(section.github-actions)・別カードとして
+// 完全に独立させる。数値が不明(plan_unknown等)な場合は0と偽装せず「—」を表示する。
+function githubActionsBillingStatusClass(status) {
+  if (status === "normal") return "compact-status-normal";
+  if (status === "warning") return "compact-status-warning";
+  if (status === "exhausted" || status === "overage") return "compact-status-exhausted";
+  if (status === "plan_unknown") return "compact-status-error";
+  return "compact-status-unknown";
+}
+
+const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
+  normal: "Normal",
+  warning: "Warning",
+  exhausted: "Exhausted",
+  overage: "Overage",
+  plan_unknown: "Plan不明",
+};
+
+// cardId(例: "github-actions.billing")はレイアウトカスタマイズ用のstable ID。
+// 呼び出し元(githubActionsBillingSectionHtml)が明示的に渡す。
+function githubActionsBillingCardHtml(data, cardId = null) {
+  const cardIdAttr = cardId ? ` data-card-id="${escapeHtml(cardId)}"` : "";
+
+  if (!data || !data.fetched) {
+    const message = data && data.error ? data.error.user_message || "取得に失敗しました" : "未取得";
+    return `
+      <article class="compact-card compact-empty compact-provider-github"${cardIdAttr}>
+        GitHub Actions: ${escapeHtml(message)}
+      </article>`;
+  }
+
+  const statusLabel = GITHUB_ACTIONS_BILLING_STATUS_LABEL[data.status] || data.status || "不明";
+  const statusClass = githubActionsBillingStatusClass(data.status);
+
+  if (data.status === "plan_unknown" || data.included_minutes === null || data.included_minutes === undefined) {
+    return `
+      <article class="compact-card compact-provider-github"${cardIdAttr}>
+        <div class="compact-card-head">
+          <span class="compact-service-name">GitHub Actions</span>
+          <span class="compact-source-badge">${escapeHtml(data.plan_name || "不明")}</span>
+        </div>
+        <div class="compact-no-limit">Used: — / Remaining: —（"Plan: read"権限を確認してください）</div>
+      </article>`;
+  }
+
+  const width = Math.min(Math.max(data.usage_percentage, 0), 100);
+  const monthLabel = `${data.billing_year}-${String(data.billing_month).padStart(2, "0")}`;
+  const overageLine =
+    data.overage_minutes && data.overage_minutes > 0
+      ? `<div class="compact-usage-line">Overage ${fmtNumber(data.overage_minutes)} min</div>`
+      : "";
+
+  return `
+    <article class="compact-card compact-provider-github"${cardIdAttr}>
+      <div class="compact-card-head">
+        <span class="compact-service-name">GitHub Actions</span>
+        <span class="compact-source-badge">${escapeHtml(data.plan_name || "-")} / ${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="compact-card-body">
+        <div class="compact-card-left">
+          <div class="compact-percent-row">
+            <span class="compact-percent-label">残り</span>
+            <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(data.remaining_minutes)} min</span>
+          </div>
+          <div class="compact-usage-line">使用済み ${fmtNumber(data.used_included_minutes)} / ${fmtNumber(data.included_minutes)} min（${fmtNumber(data.usage_percentage)}%）</div>
+          <div class="compact-meter"><div class="compact-meter-fill ${statusClass}" style="width:${width}%"></div></div>
+          ${overageLine}
+        </div>
+      </div>
+      <div class="compact-stale-notice">${escapeHtml(monthLabel)} ／ ${escapeHtml(data.source || "-")}</div>
+    </article>`;
+}
+
+function githubActionsBillingSectionHtml(data) {
+  return `<div class="compact-github-grid-inner">${githubActionsBillingCardHtml(data, "github-actions.billing")}</div>`;
+}
+
 // DOMに触れない純粋関数: Claude Code statusLineブリッジのキャッシュ1枠分(5時間 or 7日)のカードHTMLを組み立てる。
 // remaining/usedはブリッジ側で既に0-100%へ検証済みの値のみを渡される想定。
 // stale=trueは最終観測値が古い可能性があることを意味し、resetまでの「あと...」カウントダウンは抑制する。
@@ -709,6 +787,12 @@ const SECTION_META = [
     gridSelector: "#githubCards .compact-github-grid-inner",
   },
   {
+    id: "section.github-actions",
+    label: "GitHub Actions",
+    containerId: "githubActionsSection",
+    gridSelector: "#githubActionsCards .compact-github-grid-inner",
+  },
+  {
     id: "section.claude",
     label: "Claude Code Usage",
     containerId: "claudeSection",
@@ -733,6 +817,7 @@ const CARD_META_BY_SECTION = {
     { id: "github.graphql", label: "GitHub GraphQL API" },
     { id: "github.search", label: "GitHub Search API" },
   ],
+  "section.github-actions": [{ id: "github-actions.billing", label: "GitHub Actions 月間利用枠" }],
   "section.claude": [
     { id: "claude.five_hour", label: "Claude 5時間枠" },
     { id: "claude.seven_day", label: "Claude 7日枠" },
@@ -1239,16 +1324,22 @@ function renderCodexUsage(auto, manual) {
   document.querySelector("#codexUsageCards").innerHTML = codexUsageSectionHtml(auto, manual);
 }
 
-// GETのみ: /api/dashboard・/api/github-rate-limit・/api/claude-code-usage・
-// /api/claude-code-usage/manual・/api/codex-rate-limits・/api/codex-usage はいずれも保存済みの値を
-// 返すだけで、gh api rate_limitやClaude Code/Codex App Serverの起動などの外部コマンド/APIを
-// ここから直接実行することはない(更新系リクエストはここから一切送信しない)。
+function renderGithubActionsBilling(data) {
+  document.querySelector("#githubActionsCards").innerHTML = githubActionsBillingSectionHtml(data);
+}
+
+// GETのみ: /api/dashboard・/api/github-rate-limit・/api/github-actions-billing・
+// /api/claude-code-usage・/api/claude-code-usage/manual・/api/codex-rate-limits・
+// /api/codex-usage はいずれも保存済みの値を返すだけで、gh api rate_limit/gh api userや
+// Claude Code/Codex App Serverの起動などの外部コマンド/APIをここから直接実行することはない
+// (更新系リクエストはここから一切送信しない)。
 async function loadCompact() {
   try {
-    const [dashboard, github, claudeCodeUsage, claudeDesktopCloudUsage, codexRateLimits, codexUsage] =
+    const [dashboard, github, githubActionsBilling, claudeCodeUsage, claudeDesktopCloudUsage, codexRateLimits, codexUsage] =
       await Promise.all([
         fetchJson("/api/dashboard"),
         fetchJson("/api/github-rate-limit"),
+        fetchJson("/api/github-actions-billing"),
         fetchJson("/api/claude-code-usage"),
         fetchJson("/api/claude-code-usage/manual"),
         fetchJson("/api/codex-rate-limits"),
@@ -1256,12 +1347,14 @@ async function loadCompact() {
       ]);
     state.dashboard = dashboard;
     state.github = github;
+    state.githubActionsBilling = githubActionsBilling;
     state.claudeCodeUsage = claudeCodeUsage;
     state.claudeDesktopCloudUsage = claudeDesktopCloudUsage;
     state.codexRateLimits = codexRateLimits;
     state.codexUsage = codexUsage;
     renderLimitCards(dashboard);
     renderGithubSection(github);
+    renderGithubActionsBilling(githubActionsBilling);
     renderClaudeCodeUsage(claudeCodeUsage, claudeDesktopCloudUsage);
     renderCodexUsage(codexRateLimits, codexUsage);
   } catch (error) {
@@ -1326,6 +1419,9 @@ if (typeof module !== "undefined") {
     githubSecondaryRateLimitBannerHtml,
     githubAutoRefreshNoticeHtml,
     githubSectionHtml,
+    githubActionsBillingStatusClass,
+    githubActionsBillingCardHtml,
+    githubActionsBillingSectionHtml,
     claudeUsageWindowHtml,
     resolveClaudeCodeUsageDisplay,
     claudeCodeSectionHtml,
