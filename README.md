@@ -65,6 +65,30 @@ http://127.0.0.1:8000
 
 `.venv` はGit管理対象外です（`.gitignore`で除外済み）。依存パッケージのバージョン更新は、この手順の一部としてではなく、`requirements.txt`の変更内容とpytest実行結果を明示的に確認する別PRで行ってください。
 
+## Windows: 一番簡単な起動
+
+日常利用向けに、コマンドを覚えなくても起動できるBATファイルを用意しています。
+
+- リポジトリ直下の `start_dashboard.bat` をダブルクリックする
+- 自動的にブラウザで `http://127.0.0.1:8001` が開く
+- 停止する場合は、開いたコンソールウィンドウで `Ctrl+C` を押す
+
+### 初回セットアップ
+
+`start_dashboard.bat` は `.venv` を自動作成しません。初回のみ、上記の Setup または Windows Standard Commands の手順で `.venv` を作成し、依存パッケージをインストールしてください。`.venv\Scripts\python.exe` が見つからない場合、BATはサーバーを起動せずセットアップ手順を案内して終了します。
+
+### 開発時
+
+コード変更を即座に反映したい開発時は、`start_dashboard.bat`ではなく、上記「Windows Standard Commands」の `--reload` 付きコマンド（`.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001`）を使用してください。`start_dashboard.bat`は日常利用向けのため`--reload`を付けていません。
+
+### Windows再起動後
+
+Windows再起動やログオフでサーバープロセスも終了します。再度使う場合は`start_dashboard.bat`をもう一度実行してください。Windows起動時の自動起動（スタートアップ登録・タスクスケジューラ・サービス化）は現時点では未対応です。
+
+### ネットワーク
+
+`start_dashboard.bat`はサーバーを`127.0.0.1`（このPC自身）にのみbindします。他の端末やLAN上の別PCからはアクセスできません。日常利用（このPCだけでの利用）を前提とした起動方法です。
+
 ## Usage Records
 
 使用量入力には「通常加算」と「補正」があります。
