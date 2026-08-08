@@ -608,7 +608,8 @@ button:hover {
   }
 }
 
-#githubRateLimitPanel .panel-heading button {
+#githubRateLimitPanel .panel-heading button,
+#githubActionsBillingPanel .panel-heading button {
   min-width: 120px;
   width: auto;
 }

@@ -56,6 +56,12 @@ from app.collectors.openai_collector import (
 )
 from app.database import Base, SessionLocal, engine, get_db
 from app.exporter import export_json, export_limits_csv, export_usage_records_csv
+from app.github_actions_billing_cli import fetch_github_actions_billing
+from app.github_actions_billing_state import (
+    GitHubActionsBillingController,
+    GitHubActionsBillingRefreshCooldownError,
+    GitHubActionsBillingRefreshInProgressError,
+)
 from app.github_rate_limit_cli import fetch_github_rate_limit
 from app.github_rate_limit_state import (
     GitHubRateLimitController,
@@ -159,6 +165,12 @@ app.add_middleware(OptionalBasicAuthMiddleware)
 # not shared across worker processes. Page load never triggers a fetch here —
 # only the POST refresh endpoint below calls the CLI adapter.
 app.state.github_rate_limit_controller = GitHubRateLimitController()
+
+# Process-local only (see GitHubActionsBillingController docstring): a
+# separate quota from github_rate_limit_controller above (monthly Actions
+# minutes entitlement, not hourly API request quota). Page load never
+# triggers a fetch here either — only the POST refresh endpoint calls `gh`.
+app.state.github_actions_billing_controller = GitHubActionsBillingController()
 
 # Process-local only (see CodexRateLimitsController docstring): the actual
 # rate limit data lives in the file-based cache, not here. Page load never
@@ -571,6 +583,42 @@ def refresh_github_rate_limit() -> dict:
             },
         ) from exc
     _schedule_auto_refresh_if_pending(snapshot)
+    return snapshot
+
+
+@app.get("/api/github-actions-billing")
+def get_github_actions_billing() -> dict:
+    """Return the currently held state only — never runs `gh` here."""
+    controller: GitHubActionsBillingController = app.state.github_actions_billing_controller
+    return controller.snapshot(now=_current_utc_time())
+
+
+@app.post("/api/github-actions-billing/refresh")
+def refresh_github_actions_billing() -> dict:
+    """The only manually-triggered endpoint that invokes the GitHub CLI adapter
+    for Actions billing. Separate cooldown/state from
+    /api/github-rate-limit/refresh — see GitHubActionsBillingController."""
+    controller: GitHubActionsBillingController = app.state.github_actions_billing_controller
+    try:
+        snapshot = controller.refresh(now=_current_utc_time(), fetch=fetch_github_actions_billing)
+    except GitHubActionsBillingRefreshCooldownError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "cooldown_active",
+                "user_message": "更新の間隔が短すぎます。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
+    except GitHubActionsBillingRefreshInProgressError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error_type": "already_refreshing",
+                "user_message": "更新を実行中です。しばらく待ってから再度お試しください。",
+                "retry_after_seconds": 0,
+            },
+        ) from exc
     return snapshot
 
 
