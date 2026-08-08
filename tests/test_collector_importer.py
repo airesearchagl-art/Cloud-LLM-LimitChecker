@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pytest
 from sqlalchemy import func, select
 
@@ -75,10 +77,45 @@ def test_import_accepts_iso_datetime_recorded_at() -> None:
     assert record.recorded_at is not None
 
 
-def test_import_rejects_invalid_recorded_at_without_saving() -> None:
+def test_import_derives_persisted_recorded_at_from_period_end_not_recorded_at_string() -> None:
+    # OpenAI's official Usage/Costs API reports start_time/end_time as Unix
+    # timestamps, so the raw recorded_at OpenAICollector attaches is a
+    # timestamp string like "1763982000" — never a datetime.fromisoformat-
+    # parseable string. The persisted UsageRecord.recorded_at must come from
+    # the already-validated, timezone-aware period_end instead, so an
+    # unparseable recorded_at string must not prevent (or corrupt) the
+    # import.
+    from app.time_utils import app_tz
+
+    with next(make_session()) as db:
+        saved = import_normalized_records(
+            db,
+            [
+                normalized_record(
+                    "1763982000",
+                    period_start="2026-05-24T00:00:00+09:00",
+                    period_end="2026-05-25T00:00:00+09:00",
+                )
+            ],
+        )
+        record = db.scalar(select(models.UsageRecord))
+
+    expected = datetime.fromisoformat("2026-05-25T00:00:00+09:00").astimezone(app_tz())
+    assert saved == 1
+    assert record is not None
+    # SQLite round-trips DateTime(timezone=True) as a naive value (the wall
+    # clock in app_tz() at insert time), so compare naive-to-naive.
+    assert record.recorded_at == expected.replace(tzinfo=None)
+
+
+def test_import_rejects_invalid_period_without_saving() -> None:
+    # recorded_at is no longer parsed for persistence (see
+    # app.collectors.importer._plan_and_apply — the saved timestamp comes
+    # from the validated period_end instead), so an unparseable period is
+    # what must now make a record invalid.
     with next(make_session()) as db:
         with pytest.raises(CollectorImportError):
-            import_normalized_records(db, [normalized_record("not-a-date")])
+            import_normalized_records(db, [normalized_record(period_end="not-a-date")])
         usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
 
     assert usage_count == 0
@@ -86,7 +123,7 @@ def test_import_rejects_invalid_recorded_at_without_saving() -> None:
 
 def test_import_rolls_back_earlier_records_when_later_record_fails() -> None:
     with next(make_session()) as db:
-        records = [normalized_record(), normalized_record("not-a-date")]
+        records = [normalized_record(), normalized_record(period_end="not-a-date")]
         with pytest.raises(CollectorImportError):
             import_normalized_records(db, records)
 
@@ -117,7 +154,7 @@ def test_import_wraps_unexpected_error_and_rolls_back() -> None:
 def test_session_is_reusable_after_rollback() -> None:
     with next(make_session()) as db:
         with pytest.raises(CollectorImportError):
-            import_normalized_records(db, [normalized_record("not-a-date")])
+            import_normalized_records(db, [normalized_record(period_end="not-a-date")])
 
         saved = import_normalized_records(db, [normalized_record()])
         usage_count = db.scalar(select(func.count(models.UsageRecord.id)))
@@ -130,7 +167,7 @@ def test_failed_collector_run_recorded_without_partial_import_data() -> None:
     with next(make_session()) as db:
         run = crud.create_collector_run(db, "openai", dry_run=False)
 
-        records = [normalized_record(), normalized_record("not-a-date")]
+        records = [normalized_record(), normalized_record(period_end="not-a-date")]
         try:
             import_normalized_records(db, records)
         except CollectorImportError as exc:
@@ -736,7 +773,7 @@ def test_import_legacy_match_rollback_on_later_record_failure() -> None:
     with next(make_session()) as db:
         usage_record_id, legacy_key = _seed_legacy_openai_requests_row(db, used_value=3.0)
 
-        records = [normalized_record(used_value=9.0), normalized_record(recorded_at="not-a-date")]
+        records = [normalized_record(used_value=9.0), normalized_record(period_end="not-a-date")]
         with pytest.raises(CollectorImportError):
             import_normalized_records(db, records)
 

@@ -269,7 +269,15 @@ def _plan_and_apply(
                 )
                 continue
 
-            recorded_at = parse_recorded_at(record.recorded_at)
+            # The persisted UsageRecord.recorded_at is derived from the
+            # validated period_end (a timezone-aware datetime), never from
+            # record.recorded_at directly: vendors report recorded_at in
+            # whatever raw form their API uses (e.g. OpenAI's Unix
+            # timestamp string), which parse_recorded_at's
+            # datetime.fromisoformat cannot parse. record.recorded_at is
+            # still kept on the record for legacy import-key candidate
+            # lookup (see build_legacy_import_key_candidates).
+            recorded_at = record.period_end.astimezone(app_tz())
             import_key = build_import_key(record)
             existing = db.scalar(
                 select(models.CollectorImport).where(models.CollectorImport.import_key == import_key)
