@@ -13,26 +13,60 @@ never conflated in report shape or in the UI.
 
 Key semantics, confirmed against official GitHub docs (see
 docs/github-actions-billing-monitor.md for the source list):
-- GitHub Free: 2,000 included Actions minutes/month. GitHub Pro: 3,000.
+- GitHub Free: 2,000 included Actions minutes/month. GitHub Pro: 3,000. This
+  is a hard fact from the plan itself and is always knowable once the plan
+  name resolves — see `resolve_included_minutes`.
 - Standard GitHub-hosted runners are free on public repositories and never
   consume included minutes there; self-hosted runners never consume included
   minutes either. Larger runners are *always* billed separately and can
   never draw from the included-minutes allowance ("Included minutes cannot
   be used for larger runners" — GitHub Actions billing docs).
-- The Billing usage summary API
-  (GET /users/{username}/settings/billing/usage/summary, currently Public
-  Preview) returns, per product/SKU, `grossQuantity` (total consumed),
-  `discountQuantity` (the portion covered by the plan's included allowance)
-  and `netQuantity` (the billable remainder: grossQuantity - discountQuantity).
-  For a standard runner SKU, `discountQuantity` is therefore the amount that
-  actually counted against the included-minutes quota, and `netQuantity` is
-  the paid overage once that quota is exhausted. This module never treats
-  `grossQuantity` alone as "minutes consumed from the free quota" — that
-  would double count minutes GitHub already billed as overage.
-- Unknown SKUs (present in a response but not in this module's
-  STANDARD_RUNNER_SKUS / LARGER_RUNNER_SKUS / STORAGE_SKUS lists) are never
-  guessed into either bucket: they are tracked separately as skipped and
-  never added to any minutes total.
+
+IMPORTANT — what this module deliberately does NOT compute, and why:
+GitHub's official "Billing reports reference" documents `discount_amount`
+(the summary API's `discountQuantity` is the same concept, just per-SKU
+quantity instead of a dollar amount) as follows, quoted verbatim:
+
+    "The amount of usage that was discounted. Usage that is discounted as
+    part of your account's included usage is reflected in this field. Also
+    includes discounts for GitHub Actions usage for standard GitHub-hosted
+    runners in public repositories and for self-hosted runners."
+
+That is an explicit, official statement that `discountQuantity` mixes at
+least three different reasons for being free: (1) the plan's monthly
+included-minutes allowance (capped, resets monthly), (2) public-repository
+standard-runner usage (uncapped, never counts against any quota), and
+(3) self-hosted-runner usage (uncapped, never counts against any quota).
+The billing usage summary API's `usageItems` carry no repository/visibility
+field to separate these — so there is currently no officially documented,
+safe way to derive "exact minutes consumed from the plan's included
+allowance" (and therefore no safe "exact remaining minutes") from this
+endpoint alone. An earlier version of this module summed `discountQuantity`
+directly into a `used_included_minutes`/`remaining_minutes` calculation;
+that was incorrect and has been removed. `used_included_minutes`,
+`remaining_minutes`, and `usage_percentage` are always `None` here (kept as
+named fields for API stability, in case a future documented endpoint makes
+this exact split available) rather than reporting a number that could be
+inflated by unrelated, always-free usage.
+
+What this module *does* still safely report, with names chosen not to
+overstate what the field actually proves:
+- `discounted_standard_minutes`: sum of `discountQuantity` across standard
+  -runner SKUs — some unknown mix of included-allowance / public-repo /
+  self-hosted discount. Informational only, never used to compute a
+  remaining-quota number.
+- `billable_standard_minutes`: sum of `netQuantity` across the same
+  items — the portion GitHub actually billed for standard-runner usage.
+  Deliberately not called "overage": while non-zero billable minutes on a
+  standard SKU likely means the included allowance was exhausted (public
+  and self-hosted usage is always fully discounted), this module does not
+  assert that reading as confirmed without a documented guarantee.
+- `paid_non_included_minutes`: sum of `netQuantity` across larger-runner
+  SKUs — this one *is* solidly documented ("always charged for... even when
+  you have quota available from your plan"), so it is reported with
+  confidence.
+- `skipped_unknown_skus`: SKUs recognized as neither standard, larger
+  -runner, nor storage — reported but never added to any total.
 """
 
 from __future__ import annotations
@@ -43,10 +77,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 BillingStatus = Literal[
-    "normal",
-    "warning",
-    "exhausted",
-    "overage",
+    "usage_breakdown_inconclusive",
     "plan_unknown",
 ]
 
@@ -55,9 +86,12 @@ SkuClassification = Literal["standard", "larger_runner", "storage", "unknown"]
 ACTIONS_PRODUCT_NAME = "actions"  # case-insensitive match against payload "product"
 MINUTES_UNIT_TYPE = "minutes"  # case-insensitive match against payload "unitType"
 
-# Standard GitHub-hosted runner SKUs whose minutes count against the plan's
-# included-minutes allowance. Source: docs.github.com "Actions runner
-# pricing" / "Product and SKU names" (see docs/github-actions-billing-monitor.md).
+# Standard GitHub-hosted runner SKUs. Source: docs.github.com "Actions
+# runner pricing" / "Product and SKU names" (see
+# docs/github-actions-billing-monitor.md). NOTE: membership in this set does
+# NOT mean "counts toward included minutes" in a way this module can prove —
+# see the module docstring for why discountQuantity cannot be cleanly
+# attributed to the plan's included allowance alone.
 STANDARD_RUNNER_SKUS: frozenset[str] = frozenset(
     {
         "actions_linux_slim",
@@ -122,8 +156,6 @@ PLAN_INCLUDED_MINUTES: dict[str, int] = {
     "pro": 3000,
 }
 
-_WARNING_REMAINING_FRACTION = 0.2  # remaining <= 20% of included_minutes -> warning
-
 
 def classify_sku(sku: str) -> SkuClassification:
     if sku in STANDARD_RUNNER_SKUS:
@@ -156,8 +188,8 @@ def _finite_non_negative(value: object) -> float | None:
 
 @dataclass(frozen=True, slots=True)
 class ActionsMinutesAggregate:
-    eligible_used_minutes: float
-    eligible_overage_minutes: float
+    discounted_standard_minutes: float
+    billable_standard_minutes: float
     paid_non_included_minutes: float
     skipped_unknown_skus: tuple[str, ...]
 
@@ -170,14 +202,15 @@ def aggregate_actions_minutes(usage_items: list) -> ActionsMinutesAggregate:
     what excludes storage/cache items without needing to enumerate every
     storage SKU. Within those:
     - a STANDARD_RUNNER_SKUS item contributes its `discountQuantity` to
-      `eligible_used_minutes` (the portion GitHub actually covered from the
-      plan's included allowance) and its `netQuantity` to
-      `eligible_overage_minutes` (the portion billed once that allowance was
-      exhausted).
+      `discounted_standard_minutes` and its `netQuantity` to
+      `billable_standard_minutes`. Neither is treated as "included quota
+      consumed" or "overage" — see the module docstring for why
+      discountQuantity cannot be safely attributed to the plan's allowance
+      alone (it also covers public-repo and self-hosted discounts).
     - a LARGER_RUNNER_SKUS item contributes its `netQuantity` to
       `paid_non_included_minutes` — larger runners are always billed in full
       and never draw from the included allowance, so their discountQuantity
-      is expected to be 0 and is never added to `eligible_used_minutes`.
+      is expected to be 0 and is never added to `discounted_standard_minutes`.
     - any other SKU is recorded in `skipped_unknown_skus` and contributes to
       no total at all (never guessed into either bucket).
 
@@ -191,8 +224,8 @@ def aggregate_actions_minutes(usage_items: list) -> ActionsMinutesAggregate:
     if not isinstance(usage_items, list):
         raise ValueError("usageItems must be a list")
 
-    eligible_used = 0.0
-    eligible_overage = 0.0
+    discounted_standard = 0.0
+    billable_standard = 0.0
     paid_non_included = 0.0
     skipped: list[str] = []
 
@@ -216,9 +249,9 @@ def aggregate_actions_minutes(usage_items: list) -> ActionsMinutesAggregate:
 
         if classification == "standard":
             if discount_quantity is not None:
-                eligible_used += discount_quantity
+                discounted_standard += discount_quantity
             if net_quantity is not None:
-                eligible_overage += net_quantity
+                billable_standard += net_quantity
         elif classification == "larger_runner":
             if net_quantity is not None:
                 paid_non_included += net_quantity
@@ -229,27 +262,11 @@ def aggregate_actions_minutes(usage_items: list) -> ActionsMinutesAggregate:
         # inspect a SKU directly, e.g. tests.
 
     return ActionsMinutesAggregate(
-        eligible_used_minutes=eligible_used,
-        eligible_overage_minutes=eligible_overage,
+        discounted_standard_minutes=discounted_standard,
+        billable_standard_minutes=billable_standard,
         paid_non_included_minutes=paid_non_included,
         skipped_unknown_skus=tuple(skipped),
     )
-
-
-def determine_status(
-    *,
-    included_minutes: int,
-    eligible_used_minutes: float,
-    eligible_overage_minutes: float,
-) -> BillingStatus:
-    if eligible_overage_minutes > 0:
-        return "overage"
-    remaining = included_minutes - eligible_used_minutes
-    if remaining <= 0:
-        return "exhausted"
-    if included_minutes > 0 and remaining <= included_minutes * _WARNING_REMAINING_FRACTION:
-        return "warning"
-    return "normal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,10 +274,16 @@ class GitHubActionsBillingReport:
     status: BillingStatus
     plan_name: str | None
     included_minutes: int | None
+    # Always None: no officially documented API currently isolates "minutes
+    # consumed from the plan's included allowance" from public-repo/
+    # self-hosted discount (see module docstring). Kept as named fields —
+    # not removed — so the API/UI contract stays stable if a future,
+    # properly documented endpoint makes this exact split available.
     used_included_minutes: float | None
     remaining_minutes: float | None
     usage_percentage: float | None
-    overage_minutes: float | None
+    discounted_standard_minutes: float | None
+    billable_standard_minutes: float | None
     paid_non_included_minutes: float | None
     billing_year: int
     billing_month: int
@@ -289,7 +312,11 @@ def build_billing_report(
 
     `plan_name=None` (or an unrecognized plan) is not a fetch failure — it
     produces a "plan_unknown" report here, on purpose: the fetch succeeded,
-    we simply cannot safely map the plan to an included-minutes quota.
+    we simply cannot safely map the plan to an included-minutes number.
+    When the plan *is* known, status is "usage_breakdown_inconclusive" —
+    the included-minutes allowance itself is a known fact, but exactly how
+    many of those minutes have been consumed is not currently derivable
+    from any documented API (see module docstring).
 
     Raises ValueError only when `usage_items` is structurally unusable (not
     a list) — callers should pre-validate this from the raw payload before
@@ -302,40 +329,17 @@ def build_billing_report(
 
     aggregate = aggregate_actions_minutes(usage_items)
     included_minutes = resolve_included_minutes(plan_name)
-
-    if included_minutes is None:
-        return GitHubActionsBillingReport(
-            status="plan_unknown",
-            plan_name=plan_name,
-            included_minutes=None,
-            used_included_minutes=None,
-            remaining_minutes=None,
-            usage_percentage=None,
-            overage_minutes=None,
-            paid_non_included_minutes=aggregate.paid_non_included_minutes,
-            billing_year=billing_year,
-            billing_month=billing_month,
-            collected_at=collected_at,
-            source=source,
-            skipped_unknown_skus=aggregate.skipped_unknown_skus,
-        )
-
-    remaining_minutes = max(included_minutes - aggregate.eligible_used_minutes, 0.0)
-    usage_percentage = (aggregate.eligible_used_minutes / included_minutes * 100) if included_minutes > 0 else 0.0
-    status = determine_status(
-        included_minutes=included_minutes,
-        eligible_used_minutes=aggregate.eligible_used_minutes,
-        eligible_overage_minutes=aggregate.eligible_overage_minutes,
-    )
+    status: BillingStatus = "plan_unknown" if included_minutes is None else "usage_breakdown_inconclusive"
 
     return GitHubActionsBillingReport(
         status=status,
         plan_name=plan_name,
         included_minutes=included_minutes,
-        used_included_minutes=aggregate.eligible_used_minutes,
-        remaining_minutes=remaining_minutes,
-        usage_percentage=usage_percentage,
-        overage_minutes=aggregate.eligible_overage_minutes,
+        used_included_minutes=None,
+        remaining_minutes=None,
+        usage_percentage=None,
+        discounted_standard_minutes=aggregate.discounted_standard_minutes,
+        billable_standard_minutes=aggregate.billable_standard_minutes,
         paid_non_included_minutes=aggregate.paid_non_included_minutes,
         billing_year=billing_year,
         billing_month=billing_month,

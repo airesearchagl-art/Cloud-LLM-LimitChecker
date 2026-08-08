@@ -315,14 +315,16 @@ Collector実行結果と最新履歴は画面に表示され、実行履歴は `
 
 GitHub personal account（自分のアカウント）のGitHub Actions **月間** 利用枠（分）を、通常のダッシュボードと`/compact`の両方で確認できます。既存の「GitHub API Rate Limit」カード（APIリクエスト枠、1時間ごとにリセット）とは別物です。
 
-- **枠**: GitHub Free — 2,000分/月、GitHub Pro — 3,000分/月（`GET /user`の`plan.name`から判定。`free`/`pro`以外・未取得の場合はPlan不明として扱い、数値を推測しません）
-- **消費しない利用**: publicリポジトリでのstandard GitHub-hosted runnerの利用、self-hosted runnerの利用はいずれも枠を消費しません
-- **larger runner**: 常に別課金対象で、included minutes枠からは一切引かれません（`paid_non_included_minutes`として別表示）
-- **API**: `GET /users/{username}/settings/billing/usage/summary`（GitHub側で現在Public Preview）。個人アカウントのbilling usage取得には、credentialに"Plan: read"権限（fine-grained PATの"Plan"パーミッション、または`user` scope）が必要です
-- 現在のcredentialにこの権限がない場合、`permission_required`状態として安全に表示されます（`—`表示、0は表示しません）。トークンをアプリへ保存することはありません（既存のGitHub CLI認証を再利用するのみ）
-- ページ表示だけでは取得しません。「更新」ボタンを押したときだけGitHub CLI経由で取得し、以後15分間はcooldownとして再取得しません（billing情報は秒単位の更新を必要としないため）
+- **Monthly allowance**: GitHub Free — 2,000分/月、GitHub Pro — 3,000分/月（`GET /user`の`plan.name`から判定。`free`/`pro`以外・未取得の場合はPlan不明として扱い、数値を推測しません）。この値はplan名から確定できる事実です
+- **消費しない利用**: publicリポジトリでのstandard GitHub-hosted runnerの利用、self-hosted runnerの利用はいずれも月間枠（private repository向けのincluded minutes）を消費しません
+- **larger runner**: 常に別課金対象で、月間枠からは一切引かれません（`paid_non_included_minutes`として別表示。これは公式docsで明確に保証されています）
+- **重要: Exact used / Exact remainingは表示しません** — GitHub公式Billing usage summary API（Public Preview）が返す`discountQuantity`は、「account included usageによるdiscount」だけでなく「publicリポジトリのstandard runner利用」「self-hosted runner利用」のdiscountも混在するとGitHub公式Billing reportsドキュメントに明記されており、このAPIだけでは月間枠の正確な消費量・残量を算出できません（詳細は[docs/github-actions-billing-monitor.md](docs/github-actions-billing-monitor.md)）。数値は「—」表示とし、0や推測値へ偽装しません
+- 代わりに、意味を限定した参考値（`discounted_standard_minutes`＝discountされたstandard runner分、`billable_standard_minutes`＝課金対象になったstandard runner分、`paid_non_included_minutes`＝larger runner等の別課金分）を表示します
+- **API**: `GET /users/{username}/settings/billing/usage/summary`（GitHub側で現在Public Preview）。個人アカウントのbilling usage取得には、credentialに"Plan: read"権限（fine-grained PATの"Plan"パーミッション、または`user` scope）が必要です。`X-GitHub-Api-Version`ヘッダーで現在の公式APIバージョンを明示的にpinしています
+- 現在のcredentialにこの権限がない場合、`permission_required`状態として安全に表示されます。トークンをアプリへ保存することはありません（既存のGitHub CLI認証を再利用するのみ）
+- ページ表示だけでは取得しません。「更新」ボタンを押したときだけGitHub CLI経由で取得し、以後15分間はcooldownとして再取得しません（billing情報は秒単位の更新を必要としないため）。更新失敗時は固定のsafe messageのみ表示し、backendのresponse本文を画面へ出しません
 
-設計判断・公式ソースの詳細は[docs/github-actions-billing-monitor.md](docs/github-actions-billing-monitor.md)を参照してください。
+設計判断・公式ソースの詳細、および「なぜexact remainingを表示しないか」の根拠は[docs/github-actions-billing-monitor.md](docs/github-actions-billing-monitor.md)を参照してください。
 
 ## Remaining Work
 

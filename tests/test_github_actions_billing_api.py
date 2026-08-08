@@ -101,11 +101,15 @@ def test_refresh_success_response(billing_client, monkeypatch):
 
     assert response.status_code == 200
     assert body["fetched"] is True
-    assert body["status"] == "normal"
+    assert body["status"] == "usage_breakdown_inconclusive"
     assert body["plan_name"] == "pro"
     assert body["included_minutes"] == 3000
-    assert body["used_included_minutes"] == 125
-    assert body["remaining_minutes"] == 2875
+    # exact quota consumption is never fabricated from discountQuantity --
+    # see app.github_actions_billing's module docstring
+    assert body["used_included_minutes"] is None
+    assert body["remaining_minutes"] is None
+    assert body["usage_percentage"] is None
+    assert body["discounted_standard_minutes"] == 125
     assert body["source"] == "github_billing_api"
     assert body["live_validation_required"] is False
 
@@ -265,9 +269,9 @@ def test_response_never_contains_token_like_string(billing_client, monkeypatch):
     assert "stderr" not in raw_text
 
 
-# 11. overageのstatusが正しく反映される
-def test_refresh_overage_response(billing_client, monkeypatch):
-    overage_items = [
+# 11. billable_standard_minutesが正しく反映される(overageと断定はしない)
+def test_refresh_billable_standard_minutes_response(billing_client, monkeypatch):
+    billed_items = [
         {
             "product": "Actions",
             "sku": "actions_linux",
@@ -282,16 +286,19 @@ def test_refresh_overage_response(billing_client, monkeypatch):
         }
     ]
     monkeypatch.setattr(
-        "app.main.fetch_github_actions_billing", fake_success(plan_name="free", usage_items=overage_items)
+        "app.main.fetch_github_actions_billing", fake_success(plan_name="free", usage_items=billed_items)
     )
     set_now(monkeypatch, NOW)
 
     response = billing_client.post("/api/github-actions-billing/refresh")
     body = response.json()
 
-    assert body["status"] == "overage"
-    assert body["overage_minutes"] == 100
-    assert body["remaining_minutes"] == 0
+    assert body["status"] == "usage_breakdown_inconclusive"
+    assert body["discounted_standard_minutes"] == 2000
+    assert body["billable_standard_minutes"] == 100
+    # never fabricated, regardless of billable_standard_minutes being non-zero
+    assert body["remaining_minutes"] is None
+    assert body["used_included_minutes"] is None
 
 
 # 12. Basic Auth互換性: 有効時は資格情報が必須で、既存パターン(dashboard等)と同じ挙動

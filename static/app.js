@@ -383,23 +383,59 @@ function renderGithubRateLimit(data) {
 }
 
 function githubActionsBillingStatusClass(status) {
-  if (status === "overage" || status === "exhausted") return "github-status-exhausted";
-  if (status === "warning") return "github-status-warning";
   if (status === "plan_unknown") return "github-status-error";
-  if (status === "normal") return "github-status-normal";
+  if (status === "usage_breakdown_inconclusive") return "github-status-unknown";
   return "";
 }
 
 const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
-  normal: "Normal",
-  warning: "Warning",
-  exhausted: "Exhausted",
-  overage: "Overage",
+  usage_breakdown_inconclusive: "使用内訳: 判定不可",
   plan_unknown: "Plan不明",
 };
 
+// null/undefinedは"—"(未取得の"未取得"表記とは区別し、"exact値が原理的に無い"ことを示す)。
+const fmtExactOrDash = (value) => (value === null || value === undefined ? "—" : fmtNumber(value));
+
+// The only text ever shown for a non-429 refresh failure — deliberately never
+// derived from the response body (no `.text()`, never passed into an Error),
+// so a backend error page/traceback/internal detail can never reach the DOM
+// through this path. Mirrors codexRateLimitsErrorDisplay's design.
+const GITHUB_ACTIONS_BILLING_GENERIC_ERROR_MESSAGE = "GitHub Actions billingの更新に失敗しました。しばらく待ってから再度お試しください。";
+
+// DOMに触れない純粋関数: POST /api/github-actions-billing/refresh のレスポンスから
+// 画面へ表示してよい内容だけを決定する。status以外の入力(response本文)は429の
+// 場合の`detail.user_message`/`detail.retry_after_seconds`という固定schemaの
+// 2フィールドしか読まない — それ以外は本文の中身に関わらず一切参照しない。
+function githubActionsBillingErrorDisplay(status, body) {
+  if (status === 429) {
+    const detail = (body && body.detail) || {};
+    const retryAfterSeconds = typeof detail.retry_after_seconds === "number" ? detail.retry_after_seconds : 0;
+    return {
+      error_type: "cooldown_active",
+      user_message:
+        typeof detail.user_message === "string" ? detail.user_message : GITHUB_ACTIONS_BILLING_GENERIC_ERROR_MESSAGE,
+      retry_after_seconds: retryAfterSeconds,
+    };
+  }
+  return {
+    error_type: "unknown_error",
+    user_message: GITHUB_ACTIONS_BILLING_GENERIC_ERROR_MESSAGE,
+    retry_after_seconds: 0,
+  };
+}
+
 // GitHub API Rate Limit(APIリクエスト枠)とは別概念であることを明示するため、
-// 別関数・別カードとして完全に独立させる。数値が不明な場合は0と偽装せず「—」を表示する。
+// 別関数・別カードとして完全に独立させる。
+//
+// 重要: 公式Billing usage summary API(Public Preview)のdiscountQuantityは、
+// 「account included usageによるdiscount」だけでなく「publicリポジトリの
+// standard runner利用」「self-hosted runner利用」のdiscountも混在すると
+// GitHub公式Docsに明記されている(discountの内訳を区別するrepository/
+// visibility fieldはこのendpointに存在しない)。そのため exact used /
+// exact remaining / usage_percentageは常にnull("—"表示)とし、0や実数へ
+// 偽装しない。表示できるのはPlanから確定できるMonthly allowanceと、
+// 意味を限定した参考値(discounted/billable standard usage、
+// non-included paid minutes)だけ。
 function githubActionsBillingHtml(data) {
   if (!data) {
     return `<p class="muted">状態: 未取得</p>`;
@@ -421,51 +457,49 @@ function githubActionsBillingHtml(data) {
 }
 
 function githubActionsBillingCardHtml(data, isStale) {
-  const statusLabel = GITHUB_ACTIONS_BILLING_STATUS_LABEL[data.status] || data.status || "不明";
   const statusClass = githubActionsBillingStatusClass(data.status);
   const staleNoticeHtml = isStale ? `<p class="muted">古い情報（未更新）</p>` : "";
 
   if (data.status === "plan_unknown" || data.included_minutes === null || data.included_minutes === undefined) {
     return `
       ${staleNoticeHtml}
-      <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — ${escapeHtml(statusLabel)}</div>
-      <p class="form-note">Planを安全に認識できないため、月間枠を計算していません（used_included_minutes等は「—」表示）。現在のGitHub credentialに"Plan: read"権限（"user" scope）があるか確認してください。</p>
+      <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — Plan不明</div>
+      <p class="form-note">Planを安全に認識できないため、Monthly allowanceを判定していません。現在のGitHub credentialに"Plan: read"権限（"user" scope）があるか確認してください。</p>
       <div class="github-resource-cards">
         <div class="github-resource-card">
           <div class="github-resource-name">GitHub Actions</div>
-          <div>Used: —</div>
-          <div>Remaining: —</div>
           <div>Monthly allowance: —</div>
+          <div>Exact used: —</div>
+          <div>Exact remaining: —</div>
         </div>
       </div>`;
   }
 
-  const usedText = fmtNumber(data.used_included_minutes);
-  const includedText = fmtNumber(data.included_minutes);
-  const remainingText = fmtNumber(data.remaining_minutes);
-  const percentText = fmtNumber(data.usage_percentage);
-  const overageHtml =
-    data.overage_minutes && data.overage_minutes > 0
-      ? `<div class="github-error">Overage: ${fmtNumber(data.overage_minutes)} min（included枠を超過し課金対象）</div>`
-      : "";
-  const nonIncludedHtml =
-    data.paid_non_included_minutes && data.paid_non_included_minutes > 0
-      ? `<div class="muted">Non-included paid minutes (larger runner等): ${fmtNumber(data.paid_non_included_minutes)} min</div>`
-      : "";
+  const allowanceText = fmtNumber(data.included_minutes);
+  const discountedText = fmtExactOrDash(data.discounted_standard_minutes);
+  const billableText = fmtExactOrDash(data.billable_standard_minutes);
+  const nonIncludedText = fmtExactOrDash(data.paid_non_included_minutes);
 
   return `
     ${staleNoticeHtml}
-    <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — ${escapeHtml(statusLabel)}</div>
+    <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")}</div>
     <div class="github-resource-cards">
       <div class="github-resource-card">
         <div class="github-resource-name">GitHub Actions</div>
-        <div>Used: ${usedText} / ${includedText} min</div>
-        <div>Remaining: ${remainingText} min</div>
-        <div>${percentText}% used</div>
+        <div>Monthly allowance: ${allowanceText} min</div>
+        <div>Exact used: —</div>
+        <div>Exact remaining: —</div>
       </div>
     </div>
-    ${overageHtml}
-    ${nonIncludedHtml}
+    <p class="form-note">Exact remainingは、現在の公式Billing summary（Public Preview）だけでは判定できません。discountにはincluded allowance消費分だけでなく、publicリポジトリのstandard runner利用やself-hosted runner利用の割引も混在するためです。</p>
+    <div class="github-resource-cards">
+      <div class="github-resource-card">
+        <div class="github-resource-name">内訳（参考値。exactなquota消費量ではありません）</div>
+        <div>Discounted standard usage: ${discountedText} min</div>
+        <div>Billable standard usage: ${billableText} min</div>
+        <div>Non-included paid minutes: ${nonIncludedText} min</div>
+      </div>
+    </div>
     <p class="form-note">対象月: ${escapeHtml(String(data.billing_year))}-${String(data.billing_month).padStart(2, "0")} ／ 取得元: ${escapeHtml(data.source || "-")} ／ 最終取得: ${escapeHtml(fmtGithubDate(data.collected_at))}</p>`;
 }
 
@@ -1263,31 +1297,38 @@ function initApp() {
     const button = document.querySelector("#githubActionsBillingRefresh");
     button.disabled = true;
     button.textContent = "更新中...";
+    // Response bodies are never read for display here (no `.text()`, never
+    // passed into an Error) — `githubActionsBillingErrorDisplay` is the only
+    // path that turns a response into displayed text, and it never echoes
+    // body content back except the two fixed 429 fields.
+    let cooldownStarted = false;
     try {
       const response = await fetch("/api/github-actions-billing/refresh", { method: "POST" });
       if (response.status === 429) {
-        const body = await response.json().catch(() => ({}));
-        const detail = body.detail || {};
-        renderGithubActionsBilling({ error: { user_message: detail.user_message } });
-        if (detail.retry_after_seconds > 0) {
-          startGithubActionsBillingCooldownCountdown(detail.retry_after_seconds);
-        } else {
-          button.disabled = false;
-          button.textContent = "更新";
+        const body = await response.json().catch(() => null);
+        const resolved = githubActionsBillingErrorDisplay(429, body);
+        renderGithubActionsBilling({ error: { user_message: resolved.user_message } });
+        if (resolved.retry_after_seconds > 0) {
+          cooldownStarted = true;
+          startGithubActionsBillingCooldownCountdown(resolved.retry_after_seconds);
         }
         return;
       }
       if (!response.ok) {
-        throw new Error(await response.text());
+        const resolved = githubActionsBillingErrorDisplay(response.status, null);
+        renderGithubActionsBilling({ error: { user_message: resolved.user_message } });
+        return;
       }
       const data = await response.json();
       renderGithubActionsBilling(data);
-      button.disabled = false;
-      button.textContent = "更新";
     } catch (error) {
-      renderGithubActionsBilling({ error: { user_message: error.message } });
-      button.disabled = false;
-      button.textContent = "更新";
+      const resolved = githubActionsBillingErrorDisplay(null, null);
+      renderGithubActionsBilling({ error: { user_message: resolved.user_message } });
+    } finally {
+      if (!cooldownStarted) {
+        button.disabled = false;
+        button.textContent = "更新";
+      }
     }
   });
 
@@ -1396,6 +1437,7 @@ if (typeof module !== "undefined") {
     githubActionsBillingStatusClass,
     githubActionsBillingHtml,
     githubActionsBillingCardHtml,
+    githubActionsBillingErrorDisplay,
     codexRateLimitsErrorDisplay,
     confirmClaudeDesktopCloudUsageSave,
     parseDatetimeLocalToIsoOrNull,

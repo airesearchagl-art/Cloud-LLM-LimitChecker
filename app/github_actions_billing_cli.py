@@ -167,9 +167,26 @@ def _classify_failure(stderr: str) -> FetchErrorType:
     return "command_failed"
 
 
+# The billing usage summary endpoint is officially Public Preview and
+# "subject to change" — pinning both the Accept media type and the REST API
+# version (current per docs.github.com/en/rest/about-the-rest-api/api-versions
+# as of this writing) makes a future breaking change on GitHub's side fail
+# loudly (a version GitHub no longer serves errors instead of silently
+# reinterpreting the request) rather than silently changing behavior here.
+# Applied identically to both `gh api` calls (user + billing) for one
+# consistent version policy.
+GITHUB_API_VERSION = "2026-03-10"
+_API_HEADERS: tuple[str, ...] = (
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-H",
+    f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
+)
+
+
 def _run_gh_api(path: str, *, timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["gh", "api", path],
+        ["gh", "api", path, *_API_HEADERS],
         shell=False,
         capture_output=True,
         text=True,

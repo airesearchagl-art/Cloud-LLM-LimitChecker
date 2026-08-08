@@ -415,20 +415,22 @@ function githubSectionHtml(data) {
 
 // GitHub API Rate Limit(APIリクエスト枠、上のgithubSectionHtml)とは別概念の、
 // 月間Actions利用時間(分)枠。別セクション(section.github-actions)・別カードとして
-// 完全に独立させる。数値が不明(plan_unknown等)な場合は0と偽装せず「—」を表示する。
+// 完全に独立させる。
+//
+// 重要: 公式Billing usage summary API(Public Preview)のdiscountQuantityは、
+// account included usageのdiscountだけでなくpublicリポジトリのstandard
+// runner利用・self-hosted runner利用のdiscountも混在するとGitHub公式Docsに
+// 明記されており、このAPIだけでは切り分けられない。そのためexact used /
+// exact remainingは常に「—」表示とし、0や実数へ偽装しない。表示できるのは
+// Planから確定できるMonthly allowanceと、意味を限定した参考値のみ。
 function githubActionsBillingStatusClass(status) {
-  if (status === "normal") return "compact-status-normal";
-  if (status === "warning") return "compact-status-warning";
-  if (status === "exhausted" || status === "overage") return "compact-status-exhausted";
   if (status === "plan_unknown") return "compact-status-error";
+  if (status === "usage_breakdown_inconclusive") return "compact-status-unknown";
   return "compact-status-unknown";
 }
 
 const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
-  normal: "Normal",
-  warning: "Warning",
-  exhausted: "Exhausted",
-  overage: "Overage",
+  usage_breakdown_inconclusive: "使用内訳: 判定不可",
   plan_unknown: "Plan不明",
 };
 
@@ -445,9 +447,6 @@ function githubActionsBillingCardHtml(data, cardId = null) {
       </article>`;
   }
 
-  const statusLabel = GITHUB_ACTIONS_BILLING_STATUS_LABEL[data.status] || data.status || "不明";
-  const statusClass = githubActionsBillingStatusClass(data.status);
-
   if (data.status === "plan_unknown" || data.included_minutes === null || data.included_minutes === undefined) {
     return `
       <article class="compact-card compact-provider-github"${cardIdAttr}>
@@ -455,35 +454,30 @@ function githubActionsBillingCardHtml(data, cardId = null) {
           <span class="compact-service-name">GitHub Actions</span>
           <span class="compact-source-badge">${escapeHtml(data.plan_name || "不明")}</span>
         </div>
-        <div class="compact-no-limit">Used: — / Remaining: —（"Plan: read"権限を確認してください）</div>
+        <div class="compact-no-limit">Monthly allowance: — / Exact used: — / Exact remaining: —（"Plan: read"権限を確認してください）</div>
       </article>`;
   }
 
-  const width = Math.min(Math.max(data.usage_percentage, 0), 100);
   const monthLabel = `${data.billing_year}-${String(data.billing_month).padStart(2, "0")}`;
-  const overageLine =
-    data.overage_minutes && data.overage_minutes > 0
-      ? `<div class="compact-usage-line">Overage ${fmtNumber(data.overage_minutes)} min</div>`
-      : "";
+  const discountedText = fmtNumber(data.discounted_standard_minutes);
+  const billableText = fmtNumber(data.billable_standard_minutes);
+  const nonIncludedText = fmtNumber(data.paid_non_included_minutes);
 
   return `
     <article class="compact-card compact-provider-github"${cardIdAttr}>
       <div class="compact-card-head">
         <span class="compact-service-name">GitHub Actions</span>
-        <span class="compact-source-badge">${escapeHtml(data.plan_name || "-")} / ${escapeHtml(statusLabel)}</span>
+        <span class="compact-source-badge">${escapeHtml(data.plan_name || "-")}</span>
       </div>
       <div class="compact-card-body">
         <div class="compact-card-left">
-          <div class="compact-percent-row">
-            <span class="compact-percent-label">残り</span>
-            <span class="compact-percent-value compact-percent-value-sm">${fmtNumber(data.remaining_minutes)} min</span>
-          </div>
-          <div class="compact-usage-line">使用済み ${fmtNumber(data.used_included_minutes)} / ${fmtNumber(data.included_minutes)} min（${fmtNumber(data.usage_percentage)}%）</div>
-          <div class="compact-meter"><div class="compact-meter-fill ${statusClass}" style="width:${width}%"></div></div>
-          ${overageLine}
+          <div class="compact-usage-line">Monthly allowance ${fmtNumber(data.included_minutes)} min</div>
+          <div class="compact-usage-line">Exact used — / Exact remaining —</div>
+          <div class="compact-usage-line">Discounted standard ${discountedText} / Billable standard ${billableText} min</div>
+          <div class="compact-usage-line">Non-included paid ${nonIncludedText} min</div>
         </div>
       </div>
-      <div class="compact-stale-notice">${escapeHtml(monthLabel)} ／ ${escapeHtml(data.source || "-")}</div>
+      <div class="compact-stale-notice">${escapeHtml(monthLabel)} ／ ${escapeHtml(data.source || "-")} ／ exact remainingはPublic Previewでは判定不可</div>
     </article>`;
 }
 

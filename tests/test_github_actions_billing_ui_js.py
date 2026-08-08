@@ -2,9 +2,12 @@
 
 Covers static/app.js (main dashboard) and static/compact.js (/compact).
 Both must render distinctly from the existing GitHub API Rate Limit card,
-must never show a fabricated 0 for plan_unknown/permission_required states
-(a literal "—" instead), and must never leak "undefined" into the rendered
-HTML for any of these states.
+must never fabricate an exact used/remaining/percentage number (official
+Billing usage summary discountQuantity mixes included-allowance, public
+-repo, and self-hosted discount and cannot be safely split apart -- see
+app/github_actions_billing.py's module docstring), and must never leak
+"undefined" or a raw non-429 response body into the rendered HTML / error
+message.
 """
 
 import json
@@ -16,7 +19,7 @@ APP_JS = ROOT / "static" / "app.js"
 COMPACT_JS = ROOT / "static" / "compact.js"
 
 
-def run_app_js(expression: str) -> str:
+def run_app_js(expression: str):
     script = f"""
 const app = require({json.dumps(str(APP_JS))});
 const result = ({expression});
@@ -26,7 +29,7 @@ process.stdout.write(JSON.stringify(result));
     return json.loads(proc.stdout)
 
 
-def run_compact_js(expression: str) -> str:
+def run_compact_js(expression: str):
     script = f"""
 const compact = require({json.dumps(str(COMPACT_JS))});
 const result = ({expression});
@@ -36,18 +39,19 @@ process.stdout.write(JSON.stringify(result));
     return json.loads(proc.stdout)
 
 
-NORMAL_DATA = {
+INCONCLUSIVE_DATA = {
     "fetched": True,
     "refreshing": False,
     "stale": False,
     "live_validation_required": False,
-    "status": "normal",
+    "status": "usage_breakdown_inconclusive",
     "plan_name": "pro",
     "included_minutes": 3000,
-    "used_included_minutes": 125,
-    "remaining_minutes": 2875,
-    "usage_percentage": 4.1666666,
-    "overage_minutes": 0,
+    "used_included_minutes": None,
+    "remaining_minutes": None,
+    "usage_percentage": None,
+    "discounted_standard_minutes": 125,
+    "billable_standard_minutes": 0,
     "paid_non_included_minutes": 0,
     "billing_year": 2026,
     "billing_month": 8,
@@ -61,21 +65,19 @@ NORMAL_DATA = {
 }
 
 
-def with_status(status, **overrides):
-    data = dict(NORMAL_DATA)
-    data["status"] = status
+def with_overrides(**overrides):
+    data = dict(INCONCLUSIVE_DATA)
     data.update(overrides)
     return data
 
 
-PLAN_UNKNOWN_DATA = with_status(
-    "plan_unknown",
+PLAN_UNKNOWN_DATA = with_overrides(
+    status="plan_unknown",
     plan_name="team",
     included_minutes=None,
     used_included_minutes=None,
     remaining_minutes=None,
     usage_percentage=None,
-    overage_minutes=None,
 )
 
 PERMISSION_REQUIRED_DATA = {
@@ -102,12 +104,26 @@ def test_app_not_fetched_shows_未取得():
     assert "未取得" in html
 
 
-def test_app_normal_shows_used_and_remaining():
-    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(NORMAL_DATA)})")
-    assert "125" in html
-    assert "3,000" in html or "3000" in html
-    assert "2,875" in html or "2875" in html
+def test_app_never_fabricates_exact_used_or_remaining():
+    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
+    assert "Exact used: —" in html
+    assert "Exact remaining: —" in html
     assert "undefined" not in html
+
+
+def test_app_shows_monthly_allowance_from_plan():
+    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
+    assert "3,000" in html or "3000" in html
+    assert "Monthly allowance" in html
+
+
+def test_app_shows_safely_named_breakdown_fields_not_included_quota_language():
+    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
+    assert "Discounted standard usage" in html
+    assert "Billable standard usage" in html
+    assert "Non-included paid minutes" in html
+    # must never claim these numbers are the plan's included-quota consumption
+    assert "Overage" not in html
 
 
 def test_app_plan_unknown_shows_dash_not_zero():
@@ -123,25 +139,8 @@ def test_app_permission_required_shows_error_message_not_raw():
     assert "undefined" not in html
 
 
-def test_app_overage_shows_overage_line():
-    data = with_status("overage", overage_minutes=100, remaining_minutes=0, used_included_minutes=2000, included_minutes=2000)
-    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(data)})")
-    assert "Overage" in html
-    assert "100" in html
-
-
-def test_app_paid_non_included_minutes_shown_separately_from_included():
-    data = with_status("normal", paid_non_included_minutes=60)
-    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(data)})")
-    assert "Non-included" in html
-    assert "60" in html
-
-
 def test_app_status_class_mapping():
-    assert run_app_js('app.githubActionsBillingStatusClass("normal")') == "github-status-normal"
-    assert run_app_js('app.githubActionsBillingStatusClass("warning")') == "github-status-warning"
-    assert run_app_js('app.githubActionsBillingStatusClass("exhausted")') == "github-status-exhausted"
-    assert run_app_js('app.githubActionsBillingStatusClass("overage")') == "github-status-exhausted"
+    assert run_app_js('app.githubActionsBillingStatusClass("usage_breakdown_inconclusive")') == "github-status-unknown"
     assert run_app_js('app.githubActionsBillingStatusClass("plan_unknown")') == "github-status-error"
 
 
@@ -149,11 +148,43 @@ def test_app_stale_last_known_notice_shown():
     data = {
         "fetched": False,
         "error": {"error_type": "timeout", "user_message": "Fetching GitHub Actions billing usage timed out."},
-        "last_known": {**NORMAL_DATA, "stale": True},
+        "last_known": {**INCONCLUSIVE_DATA, "stale": True},
     }
     html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(data)})")
     assert "古い情報" in html
     assert "undefined" not in html
+
+
+# --- app.js: githubActionsBillingErrorDisplay (raw response body leak fix) --------
+
+
+def test_app_error_display_429_uses_backend_user_message():
+    body = {"detail": {"user_message": "更新の間隔が短すぎます。しばらく待ってから再度お試しください。", "retry_after_seconds": 42}}
+    resolved = run_app_js(f"app.githubActionsBillingErrorDisplay(429, {json.dumps(body)})")
+    assert resolved["user_message"] == "更新の間隔が短すぎます。しばらく待ってから再度お試しください。"
+    assert resolved["retry_after_seconds"] == 42
+
+
+def test_app_error_display_non_429_never_echoes_raw_body_secret():
+    # Simulates a 500 response whose body contains a secret-looking marker --
+    # githubActionsBillingErrorDisplay must never read/echo response bodies
+    # for non-429 statuses, only return the fixed generic message.
+    resolved = run_app_js('app.githubActionsBillingErrorDisplay(500, null)')
+    assert "SECRET_MARKER" not in resolved["user_message"]
+    assert resolved["user_message"] == "GitHub Actions billingの更新に失敗しました。しばらく待ってから再度お試しください。"
+    assert resolved["error_type"] == "unknown_error"
+
+
+def test_app_error_display_429_with_malformed_body_falls_back_to_generic():
+    resolved = run_app_js('app.githubActionsBillingErrorDisplay(429, {"unexpected": "SECRET_MARKER_XYZ"})')
+    assert "SECRET_MARKER_XYZ" not in resolved["user_message"]
+    assert resolved["user_message"] == "GitHub Actions billingの更新に失敗しました。しばらく待ってから再度お試しください。"
+
+
+def test_app_error_display_network_error_uses_generic_message():
+    resolved = run_app_js("app.githubActionsBillingErrorDisplay(null, null)")
+    assert resolved["user_message"] == "GitHub Actions billingの更新に失敗しました。しばらく待ってから再度お試しください。"
+    assert resolved["error_type"] == "unknown_error"
 
 
 # --- compact.js: githubActionsBillingCardHtml / githubActionsBillingSectionHtml ---
@@ -165,56 +196,57 @@ def test_compact_not_fetched_card_has_card_id():
     assert "undefined" not in html
 
 
-def test_compact_normal_card_renders_percentage_and_minutes():
-    html = run_compact_js(f'compact.githubActionsBillingCardHtml({json.dumps(NORMAL_DATA)}, "github-actions.billing")')
+def test_compact_never_fabricates_exact_used_or_remaining():
+    html = run_compact_js(
+        f'compact.githubActionsBillingCardHtml({json.dumps(INCONCLUSIVE_DATA)}, "github-actions.billing")'
+    )
     assert 'data-card-id="github-actions.billing"' in html
-    assert "125" in html
+    assert "Exact used —" in html
+    assert "Exact remaining —" in html
     assert "undefined" not in html
 
 
 def test_compact_plan_unknown_card_shows_dash():
-    html = run_compact_js(f'compact.githubActionsBillingCardHtml({json.dumps(PLAN_UNKNOWN_DATA)}, "github-actions.billing")')
+    html = run_compact_js(
+        f'compact.githubActionsBillingCardHtml({json.dumps(PLAN_UNKNOWN_DATA)}, "github-actions.billing")'
+    )
     assert "—" in html
     assert "undefined" not in html
 
 
 def test_compact_section_html_wraps_grid_inner():
-    html = run_compact_js(f"compact.githubActionsBillingSectionHtml({json.dumps(NORMAL_DATA)})")
+    html = run_compact_js(f"compact.githubActionsBillingSectionHtml({json.dumps(INCONCLUSIVE_DATA)})")
     assert "compact-github-grid-inner" in html
     assert 'data-card-id="github-actions.billing"' in html
 
 
 def test_compact_status_class_mapping():
-    assert run_compact_js('compact.githubActionsBillingStatusClass("normal")') == "compact-status-normal"
-    assert run_compact_js('compact.githubActionsBillingStatusClass("warning")') == "compact-status-warning"
-    assert run_compact_js('compact.githubActionsBillingStatusClass("exhausted")') == "compact-status-exhausted"
-    assert run_compact_js('compact.githubActionsBillingStatusClass("overage")') == "compact-status-exhausted"
+    assert run_compact_js('compact.githubActionsBillingStatusClass("usage_breakdown_inconclusive")') == "compact-status-unknown"
     assert run_compact_js('compact.githubActionsBillingStatusClass("plan_unknown")') == "compact-status-error"
 
 
-# --- percentage boundaries ---------------------------------------------------------
-
-
-def test_compact_usage_percentage_clamped_at_100_for_meter_width():
-    # overage can push usage_percentage slightly above 100 conceptually; the
-    # meter fill width must still be clamped to 100 so the bar never overflows.
-    data = with_status("overage", usage_percentage=105.0, overage_minutes=60, remaining_minutes=0)
-    html = run_compact_js(f'compact.githubActionsBillingCardHtml({json.dumps(data)}, "github-actions.billing")')
-    assert "width:100%" in html
-
-
-def test_compact_usage_percentage_zero_renders_without_error():
-    data = with_status("normal", usage_percentage=0.0, used_included_minutes=0, remaining_minutes=3000)
-    html = run_compact_js(f'compact.githubActionsBillingCardHtml({json.dumps(data)}, "github-actions.billing")')
-    assert "width:0%" in html
-    assert "undefined" not in html
+def test_compact_shows_safely_named_breakdown_not_overage():
+    html = run_compact_js(
+        f'compact.githubActionsBillingCardHtml({json.dumps(INCONCLUSIVE_DATA)}, "github-actions.billing")'
+    )
+    assert "Discounted standard" in html
+    assert "Billable standard" in html
+    assert "Non-included paid" in html
+    assert "Overage" not in html
 
 
 def test_app_and_compact_never_conflate_with_rate_limit_labels():
-    html_app = run_app_js(f"app.githubActionsBillingHtml({json.dumps(NORMAL_DATA)})")
+    html_app = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
     html_compact = run_compact_js(
-        f'compact.githubActionsBillingCardHtml({json.dumps(NORMAL_DATA)}, "github-actions.billing")'
+        f'compact.githubActionsBillingCardHtml({json.dumps(INCONCLUSIVE_DATA)}, "github-actions.billing")'
     )
     for html in (html_app, html_compact):
         assert "REST API core" not in html
         assert "GraphQL API" not in html
+
+
+def test_compact_billable_and_paid_non_included_render_without_error():
+    data = with_overrides(discounted_standard_minutes=2000, billable_standard_minutes=100, paid_non_included_minutes=60)
+    html = run_compact_js(f'compact.githubActionsBillingCardHtml({json.dumps(data)}, "github-actions.billing")')
+    assert "undefined" not in html
+    assert "NaN" not in html

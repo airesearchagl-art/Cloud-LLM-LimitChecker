@@ -64,7 +64,11 @@ def test_successful_fetch_converts_to_report(monkeypatch):
     assert report is not None
     assert report.plan_name == "pro"
     assert report.included_minutes == 3000
-    assert report.used_included_minutes == 125
+    assert report.status == "usage_breakdown_inconclusive"
+    # exact quota consumption is never fabricated -- see
+    # app.github_actions_billing's module docstring
+    assert report.used_included_minutes is None
+    assert report.discounted_standard_minutes == 125
 
 
 # 3. plan.nameが取得できなくてもfetchはsuccess(plan_unknownはdomain層の責務)
@@ -290,6 +294,27 @@ def test_invoked_with_shell_false(monkeypatch):
     cli.fetch_github_actions_billing(now=NOW)
 
     assert all(kwargs.get("shell") is False for kwargs in captured_kwargs)
+
+
+# 19b. userコール・billingコールの両方で同じAccept / X-GitHub-Api-Versionが固定される
+# (Public PreviewのAPIは仕様変更され得るため、versionを明示してpinする)
+def test_both_calls_pin_the_same_accept_and_api_version_headers(monkeypatch):
+    captured_args = []
+
+    def run(args, **kwargs):
+        captured_args.append(args)
+        if args[2] == "user":
+            return make_completed(stdout=json.dumps(USER_PAYLOAD_PRO))
+        return make_completed(stdout=json.dumps(BILLING_PAYLOAD))
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    cli.fetch_github_actions_billing(now=NOW)
+
+    assert len(captured_args) == 2
+    for args in captured_args:
+        assert "-H" in args
+        assert "Accept: application/vnd.github+json" in args
+        assert f"X-GitHub-Api-Version: {cli.GITHUB_API_VERSION}" in args
 
 
 # 19. 失敗fetchはbuild_github_actions_billing_reportがNoneを返す
