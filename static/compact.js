@@ -9,10 +9,39 @@ const state = {
   codexUsage: null,
 };
 
-async function fetchJson(path) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+// response bodyを一切読み取らずuser-visible messageへ渡さない設計。non-2xx・
+// JSON parse失敗・network errorのいずれも{ok:false}を返すだけで、決して例外を
+// 投げない(呼び出し元のPromise.allを1 endpointの失敗で全滅させないため)。
+// raw body/status text/exceptionのmessageは一切保持しない — 何が失敗したかの
+// 表示に使ってよいのはCOMPACT_PROVIDER_ERROR_MESSAGESの固定文言だけ。
+async function fetchJsonSafe(path) {
+  try {
+    const res = await fetch(path);
+    if (!res.ok) return { ok: false };
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false };
+  }
+}
+
+// 各provider専用の固定safe message。実response本文・status text・例外messageは
+// 一切参照しない — 429以外のrefresh失敗をstatic/app.jsのgithubActionsBillingErrorDisplay
+// と同じ設計思想で扱う(raw bodyがDOMへ出ないことをtestで固定)。
+const COMPACT_PROVIDER_ERROR_MESSAGES = {
+  dashboard: "Dashboard情報の取得に失敗しました",
+  github: "GitHub API Rate Limitの取得に失敗しました",
+  githubActionsBilling: "GitHub Actions情報の取得に失敗しました",
+  claudeCodeUsage: "Claude Code Usageの取得に失敗しました",
+  codexUsage: "Codex Usageの取得に失敗しました",
+};
+
+function compactProviderErrorMessage(providerKey) {
+  return COMPACT_PROVIDER_ERROR_MESSAGES[providerKey] || "取得に失敗しました";
+}
+
+function compactProviderErrorHtml(providerKey) {
+  return `<div class="compact-card compact-empty">${escapeHtml(compactProviderErrorMessage(providerKey))}</div>`;
 }
 
 function escapeHtml(value) {
@@ -1322,43 +1351,105 @@ function renderGithubActionsBilling(data) {
   document.querySelector("#githubActionsCards").innerHTML = githubActionsBillingSectionHtml(data);
 }
 
+// builder()が投げても他providerの描画を道連れにしない防御層。builder自体は
+// 通常例外を投げない設計(各枝で.okを見てから.dataへ触れる)だが、想定外の
+// render関数側の不具合が1 provider全体の取得失敗と誤認されないよう、ここでも
+// 個別にcatchし同じ固定safe messageへfallbackする。
+function _compactSafeProviderHtml(providerKey, builder) {
+  try {
+    return builder();
+  } catch (error) {
+    return compactProviderErrorHtml(providerKey);
+  }
+}
+
+// DOMに触れない純粋関数: 7つのfetchJsonSafe結果({ok, data}または{ok:false})から、
+// 各container要素へセットすべきHTML文字列のplanを組み立てる。1つのproviderが
+// 失敗しても他providerの成功結果はそのまま反映され、失敗したproviderだけ
+// COMPACT_PROVIDER_ERROR_MESSAGESの固定文言へ置き換わる(raw response bodyは
+// resultsのどこにも保持されていないため、そもそも表示しようがない)。
+// Claude(auto/manual)・Codex(rate limits/usage)はそれぞれ2 endpointの組だが、
+// 既存render関数(claudeCodeSectionHtml等)の入力contractを壊さないよう、
+// 両方成功した場合のみ従来どおり両方を渡す — 片方だけの部分結果を新しい
+// 組み合わせとして渡すことはしない。
+function buildCompactRenderPlan(results) {
+  return {
+    limitCards: _compactSafeProviderHtml("dashboard", () => {
+      if (!results.dashboard.ok) return compactProviderErrorHtml("dashboard");
+      const sorted = sortDashboardRows(results.dashboard.data);
+      return sorted.length
+        ? sorted.map(limitCardHtml).join("")
+        : `<div class="compact-card compact-empty">表示できる制限項目がありません。</div>`;
+    }),
+    githubCards: _compactSafeProviderHtml("github", () =>
+      results.github.ok ? githubSectionHtml(results.github.data) : compactProviderErrorHtml("github")
+    ),
+    githubActionsCards: _compactSafeProviderHtml("githubActionsBilling", () =>
+      results.githubActionsBilling.ok
+        ? githubActionsBillingSectionHtml(results.githubActionsBilling.data)
+        : compactProviderErrorHtml("githubActionsBilling")
+    ),
+    claudeCodeUsageCards: _compactSafeProviderHtml("claudeCodeUsage", () => {
+      if (!results.claudeAuto.ok || !results.claudeManual.ok) return compactProviderErrorHtml("claudeCodeUsage");
+      const resolved = resolveClaudeCodeUsageDisplay(results.claudeAuto.data, results.claudeManual.data);
+      return claudeCodeSectionHtml(resolved);
+    }),
+    codexUsageCards: _compactSafeProviderHtml("codexUsage", () =>
+      results.codexRateLimits.ok && results.codexUsage.ok
+        ? codexUsageSectionHtml(results.codexRateLimits.data, results.codexUsage.data)
+        : compactProviderErrorHtml("codexUsage")
+    ),
+  };
+}
+
 // GETのみ: /api/dashboard・/api/github-rate-limit・/api/github-actions-billing・
 // /api/claude-code-usage・/api/claude-code-usage/manual・/api/codex-rate-limits・
 // /api/codex-usage はいずれも保存済みの値を返すだけで、gh api rate_limit/gh api userや
 // Claude Code/Codex App Serverの起動などの外部コマンド/APIをここから直接実行することはない
 // (更新系リクエストはここから一切送信しない)。
+//
+// fetchJsonSafeは例外を投げないため、1 endpointの404/500/network errorが
+// Promise.allを全滅させることはない — 各providerは独立して成功/失敗を判定し、
+// 失敗したprovider「だけ」が固定safe messageへ置き換わる(部分失敗耐性)。
 async function loadCompact() {
-  try {
-    const [dashboard, github, githubActionsBilling, claudeCodeUsage, claudeDesktopCloudUsage, codexRateLimits, codexUsage] =
-      await Promise.all([
-        fetchJson("/api/dashboard"),
-        fetchJson("/api/github-rate-limit"),
-        fetchJson("/api/github-actions-billing"),
-        fetchJson("/api/claude-code-usage"),
-        fetchJson("/api/claude-code-usage/manual"),
-        fetchJson("/api/codex-rate-limits"),
-        fetchJson("/api/codex-usage"),
-      ]);
-    state.dashboard = dashboard;
-    state.github = github;
-    state.githubActionsBilling = githubActionsBilling;
-    state.claudeCodeUsage = claudeCodeUsage;
-    state.claudeDesktopCloudUsage = claudeDesktopCloudUsage;
-    state.codexRateLimits = codexRateLimits;
-    state.codexUsage = codexUsage;
-    renderLimitCards(dashboard);
-    renderGithubSection(github);
-    renderGithubActionsBilling(githubActionsBilling);
-    renderClaudeCodeUsage(claudeCodeUsage, claudeDesktopCloudUsage);
-    renderCodexUsage(codexRateLimits, codexUsage);
-  } catch (error) {
-    document.querySelector("#limitCards").innerHTML = `<div class="compact-card compact-empty">取得に失敗しました: ${escapeHtml(error.message)}</div>`;
-  } finally {
-    renderLastRendered();
-    // innerHTML差し替え(上のrender*)で失われるカード/セクションの並び順・表示状態を、
-    // 保存済みのlayout stateへ合わせて毎回(30秒ごとの自動更新を含む)再適用する。
-    applyFullLayout();
-  }
+  const [dashboard, github, githubActionsBilling, claudeAuto, claudeManual, codexRateLimits, codexUsage] =
+    await Promise.all([
+      fetchJsonSafe("/api/dashboard"),
+      fetchJsonSafe("/api/github-rate-limit"),
+      fetchJsonSafe("/api/github-actions-billing"),
+      fetchJsonSafe("/api/claude-code-usage"),
+      fetchJsonSafe("/api/claude-code-usage/manual"),
+      fetchJsonSafe("/api/codex-rate-limits"),
+      fetchJsonSafe("/api/codex-usage"),
+    ]);
+
+  if (dashboard.ok) state.dashboard = dashboard.data;
+  if (github.ok) state.github = github.data;
+  if (githubActionsBilling.ok) state.githubActionsBilling = githubActionsBilling.data;
+  if (claudeAuto.ok) state.claudeCodeUsage = claudeAuto.data;
+  if (claudeManual.ok) state.claudeDesktopCloudUsage = claudeManual.data;
+  if (codexRateLimits.ok) state.codexRateLimits = codexRateLimits.data;
+  if (codexUsage.ok) state.codexUsage = codexUsage.data;
+
+  const plan = buildCompactRenderPlan({
+    dashboard,
+    github,
+    githubActionsBilling,
+    claudeAuto,
+    claudeManual,
+    codexRateLimits,
+    codexUsage,
+  });
+  document.querySelector("#limitCards").innerHTML = plan.limitCards;
+  document.querySelector("#githubCards").innerHTML = plan.githubCards;
+  document.querySelector("#githubActionsCards").innerHTML = plan.githubActionsCards;
+  document.querySelector("#claudeCodeUsageCards").innerHTML = plan.claudeCodeUsageCards;
+  document.querySelector("#codexUsageCards").innerHTML = plan.codexUsageCards;
+
+  renderLastRendered();
+  // innerHTML差し替え(上のrender*)で失われるカード/セクションの並び順・表示状態を、
+  // 保存済みのlayout stateへ合わせて毎回(30秒ごとの自動更新を含む)再適用する。
+  applyFullLayout();
 }
 
 function initCompact() {
@@ -1416,6 +1507,9 @@ if (typeof module !== "undefined") {
     githubActionsBillingStatusClass,
     githubActionsBillingCardHtml,
     githubActionsBillingSectionHtml,
+    compactProviderErrorMessage,
+    compactProviderErrorHtml,
+    buildCompactRenderPlan,
     claudeUsageWindowHtml,
     resolveClaudeCodeUsageDisplay,
     claudeCodeSectionHtml,

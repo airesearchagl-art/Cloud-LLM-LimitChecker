@@ -159,9 +159,11 @@ either side does not silently break aggregation.
 ## Human Gate: current credential permission status
 
 This app's existing `gh` CLI OAuth token (already used by
-`app/github_rate_limit_cli.py`) has scopes `gist, read:org, repo, workflow`
-— it does **not** have the classic `user` scope. Read-only, no-credential
--value-shown checks performed during implementation:
+`app/github_rate_limit_cli.py`) is reused unchanged by this feature; no new
+credential is created or stored.
+
+**2026-08-08 (first check, before this session's review round):** `gist,
+read:org, repo, workflow` scopes — no `user` scope.
 
 - `gh api user` → succeeds, but `plan` is `null` (plan visibility requires
   the `user` scope).
@@ -169,14 +171,31 @@ This app's existing `gh` CLI OAuth token (already used by
   with `gh`'s own diagnostic: `This API operation needs the "user" scope.
   To request it, run: gh auth refresh -h github.com -s user`.
 
-Per this session's explicit instructions, **no scope/permission change was
-made** (`gh auth refresh` was not run). This is why `_looks_like_missing_scope_or_permission`
-in `app/github_actions_billing_cli.py` treats this specific 404 shape as
-`permission_required` rather than `api_unavailable` — it is a scope
-problem, not a "this account can't use this API at all" problem. Until a
-credential with the `user` scope (or a fine-grained PAT with "Plan: read")
-is available, live validation of the actual billing payload shape against
-real data is not possible; this feature runs in `permission_required` state
+**2026-08-09 (re-check, after the user reported running `gh auth refresh -h
+github.com -s user` themselves and confirming the `user` scope via `gh auth
+status` on their end):** re-running the identical read-only checks from
+this session found `gh auth status` reporting scopes `gist, read:org,
+repo` (note: `workflow` no longer listed either) — **no `user` scope
+detected**, and both `gh api user` (`plan` still `null`) and the billing
+summary endpoint (still HTTP 404 with the same "needs the \"user\" scope"
+diagnostic) behaved identically to the pre-refresh state. This session made
+**no credential/scope changes of its own** (`gh auth refresh`, PAT
+creation, and similar were not run, per instructions) — the discrepancy
+between the user's own `gh auth status` observation and what this
+session's `gh` invocations see is reported here as-is, without guessing at
+a cause (possibly a different keyring entry/session than the one this
+environment resolves `gh` credentials from). No token value was read,
+displayed, or recorded at any point.
+
+Because live validation still could not reach a 200 response, this is why
+`_looks_like_missing_scope_or_permission` in
+`app/github_actions_billing_cli.py` continues to treat this specific 404
+shape as `permission_required` rather than `api_unavailable` — it is a
+scope problem, not a "this account can't use this API at all" problem.
+Until a credential where `gh`'s own diagnostics confirm the `user` scope
+is available *to this session*, live validation of the actual billing
+payload shape against real data remains not possible; this feature
+continues to run in `permission_required` state
 with this credential, which is exercised by
 `tests/test_github_actions_billing_cli.py` and
 `tests/test_github_actions_billing_api.py`. Note that even with such a
@@ -197,4 +216,35 @@ unknown from this API alone.
 | Standard-runner discount/billed totals (`discounted_standard_minutes` / `billable_standard_minutes`) | **Partial** — safely summed from documented fields, but not attributable to a single cause |
 | Exact minutes consumed from the included allowance (`used_included_minutes`) | **Inconclusive** — no currently-documented API isolates this from public-repo/self-hosted discount |
 | Exact remaining minutes (`remaining_minutes`) / usage percentage (`usage_percentage`) | **Inconclusive** — depends on the above |
-| Live validation against real account data | **Not performed** — current `gh` credential lacks the `user` scope / "Plan: read" permission (Human Gate, unchanged by this session) |
+| Live validation against real account data | **Not performed** — this session's `gh` invocations still could not obtain the `user` scope / "Plan: read" permission (Human Gate; see updated note above for the 2026-08-09 re-check) |
+
+## /compact endpoint-level partial-failure resilience
+
+A real-world incident (frontend on a newer commit than a stale running
+backend process, so `GET /api/github-actions-billing` 404'd) exposed that
+`static/compact.js`'s `loadCompact()` fetched all endpoints via a single
+`Promise.all()` over calls that threw on any non-2xx response — one
+endpoint failing rejected the whole batch, collapsing every card (GitHub
+Rate Limit, Claude Code Usage, Codex Usage included) into one top-level
+message that also interpolated the failing endpoint's raw response body
+(`{"detail":"Not Found"}`) directly into the DOM.
+
+Fixed by replacing the throwing `fetchJson` with `fetchJsonSafe` (never
+rejects; returns `{ok: false}` on any non-2xx/parse/network failure,
+discarding the response body entirely — there is nothing to leak because
+nothing is kept) and a pure `buildCompactRenderPlan(results)` function that
+decides, per provider, whether to render its normal data or a fixed
+`COMPACT_PROVIDER_ERROR_MESSAGES[...]` string. Providers are isolated at
+five points: dashboard, GitHub Rate Limit, GitHub Actions billing, Claude
+(auto+manual — either endpoint failing shows the Claude section as failed,
+matching this codebase's existing single-render-call contract for that
+pair), and Codex (rate limits+usage, same pairing rule). A failure in one
+provider never affects another's rendering, and the existing 30-second
+auto-refresh (`setInterval(loadCompact, ...)`) inherits this isolation for
+free since it calls the same `loadCompact()`.
+
+The same `githubActionsBillingErrorDisplay`-style principle from
+`static/app.js` (never read a response body into a displayed message for
+anything other than the two documented 429 fields) now applies uniformly
+across every `/compact` endpoint, not just the GitHub Actions billing
+refresh button.
