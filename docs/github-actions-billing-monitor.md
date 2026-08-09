@@ -162,6 +162,13 @@ This app's existing `gh` CLI OAuth token (already used by
 `app/github_rate_limit_cli.py`) is reused unchanged by this feature; no new
 credential is created or stored.
 
+### Historical validation (2026-08-08 – 2026-08-09, kept for record)
+
+The entries below describe the state of investigation *before* the scope
+was actually added to the credential. They are kept as a historical record
+of the debugging trail, not as the current state — see "Final live
+validation" further down for the current, successful state.
+
 **2026-08-08 (first check, before this session's review round):** `gist,
 read:org, repo, workflow` scopes — no `user` scope.
 
@@ -187,24 +194,48 @@ a cause (possibly a different keyring entry/session than the one this
 environment resolves `gh` credentials from). No token value was read,
 displayed, or recorded at any point.
 
-Because live validation still could not reach a 200 response, this is why
-`_looks_like_missing_scope_or_permission` in
-`app/github_actions_billing_cli.py` continues to treat this specific 404
-shape as `permission_required` rather than `api_unavailable` — it is a
-scope problem, not a "this account can't use this API at all" problem.
-Until a credential where `gh`'s own diagnostics confirm the `user` scope
-is available *to this session*, live validation of the actual billing
-payload shape against real data remains not possible; this feature
-continues to run in `permission_required` state
-with this credential, which is exercised by
-`tests/test_github_actions_billing_cli.py` and
-`tests/test_github_actions_billing_api.py`. Note that even with such a
-credential, live validation could confirm the *shape* of a real response
-(field names, presence/absence of a repository field, etc.) but — per
-"Why exact remaining minutes cannot currently be computed" above — could
-not by itself prove an exact included-minutes-consumed number, since the
-account's own mix of public/private/self-hosted usage would still be
-unknown from this API alone.
+At the time of these checks, because live validation still could not reach
+a 200 response, this was why `_looks_like_missing_scope_or_permission` in
+`app/github_actions_billing_cli.py` treated this specific 404 shape as
+`permission_required` rather than `api_unavailable` — it is a scope
+problem, not a "this account can't use this API at all" problem. That
+detection logic is unaffected by the update below; it is what correctly
+allowed the feature to recover once the scope became available.
+
+### Final live validation (2026-08-09, current state)
+
+As an explicit Human Gate action, the user added the `user` scope to their
+GitHub CLI credential. Following that change, a live billing refresh was
+run through the real application (not a mocked/unit-test path) and
+succeeded end-to-end:
+
+- The GitHub plan was recognized (no longer `null`).
+- `included_minutes` was retrieved from the plan mapping.
+- The billing year/month were retrieved.
+- The billing summary payload was parsed without error.
+- Results were displayed correctly on both the main dashboard and
+  `/compact`.
+
+Notes on what this does and does not change:
+
+- Claude Code itself did not change any credential or scope, in this or
+  any prior session — the scope addition was performed by the user as the
+  Human Gate action.
+- Actual account usage quantities observed during this live validation
+  (e.g. specific minute counts) are intentionally **not** recorded in this
+  document.
+- No token value was retrieved, displayed, or stored at any point.
+- This confirms the live billing API payload **fetch/parse/display path**
+  end-to-end. It does **not** change the exact-remaining-minutes
+  calculation limitation described above — GitHub's billing summary API
+  still does not expose a field that isolates included-allowance
+  consumption from public-repo/self-hosted discount, so "Why exact
+  remaining minutes cannot currently be computed" still applies unchanged.
+  Live validation could confirm the *shape* of a real response (field
+  names, presence/absence of a repository field, etc.), but it could not
+  by itself prove an exact included-minutes-consumed number, since the
+  account's own mix of public/private/self-hosted usage is still unknown
+  from this API alone.
 
 ## Current support level summary
 
@@ -216,7 +247,7 @@ unknown from this API alone.
 | Standard-runner discount/billed totals (`discounted_standard_minutes` / `billable_standard_minutes`) | **Partial** — safely summed from documented fields, but not attributable to a single cause |
 | Exact minutes consumed from the included allowance (`used_included_minutes`) | **Inconclusive** — no currently-documented API isolates this from public-repo/self-hosted discount |
 | Exact remaining minutes (`remaining_minutes`) / usage percentage (`usage_percentage`) | **Inconclusive** — depends on the above |
-| Live validation against real account data | **Not performed** — this session's `gh` invocations still could not obtain the `user` scope / "Plan: read" permission (Human Gate; see updated note above for the 2026-08-09 re-check) |
+| Live billing API payload fetch/parse (plan recognition, `included_minutes`, billing period, summary parsing, dashboard/`/compact` display) | **Supported — live validated 2026-08-09** after the user added the `user` scope to their credential as a Human Gate action (see "Final live validation" above) |
 
 ## /compact endpoint-level partial-failure resilience
 
