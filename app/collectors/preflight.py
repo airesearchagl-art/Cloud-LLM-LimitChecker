@@ -74,9 +74,13 @@ def openai_preflight() -> VendorPreflightStatus:
             "OPENAI_API_KEY must be an Organization Admin API key (created under "
             "Organization -> Admin keys), not a regular/project API key — the "
             "official Usage and Costs endpoints require it.",
-            "Budget/spend-cap is write-only in OpenAI's official API "
-            "(POST /v1/organization/spend_limit); no official read/GET endpoint "
-            "was found, so this collector never reports budget data.",
+            "Organization hard spend limit is read via GET /v1/organization/spend_limit "
+            "(Admin API key required, same as Usage/Costs) and normalized with "
+            "metric_kind=\"budget\" — per this app's persistence policy (see "
+            "docs/vendor-collector-production-readiness.md), budget rows are never "
+            "saved as a UsageRecord (returned as an unsupported_metric_kind outcome "
+            "instead, same as Gemini's quota rows). This collector never calls the "
+            "write (POST) or delete (DELETE) spend_limit endpoints.",
             "Project-scoped rate-limit quotas (GET /v1/organization/projects/{id}/rate_limits) "
             "exist officially but are not implemented by this collector yet.",
             _LIVE_VALIDATION_NOTE,

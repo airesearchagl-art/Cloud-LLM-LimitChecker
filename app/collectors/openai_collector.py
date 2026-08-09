@@ -27,6 +27,12 @@ class OpenAIManagementNetworkError(RuntimeError):
 # paired with the seen-pages guard in _get_paginated_data.
 _MAX_PAGES = 50
 
+# This collector reads GET /organization/spend_limit (the organization's
+# hard spend limit, a configuration snapshot) but deliberately never calls
+# the official write (POST /organization/spend_limit) or delete
+# (DELETE /organization/spend_limit) endpoints — GET only, consistent with
+# this app's read-only "管理情報取得専用" philosophy (see README.md).
+
 
 @dataclass(slots=True)
 class OpenAIUsageCostCollector:
@@ -63,7 +69,12 @@ class OpenAIUsageCostCollector:
                 "group_by": ["project_id", "line_item"],
             },
         )
-        return self._normalize_usage(usage_buckets) + self._normalize_costs(costs_buckets)
+        spend_limit_payload = self._get_json("/organization/spend_limit", {})
+        return (
+            self._normalize_usage(usage_buckets)
+            + self._normalize_costs(costs_buckets)
+            + self._normalize_spend_limit(spend_limit_payload)
+        )
 
     def _get_paginated_data(self, path: str, params: dict[str, Any]) -> list[dict[str, Any]]:
         # Official pagination: request param `page`, response field
@@ -86,7 +97,10 @@ class OpenAIUsageCostCollector:
         return all_data
 
     def _get_json(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
-        url = f"{self.base_url}{path}?{urllib.parse.urlencode(params, doseq=True)}"
+        # spend_limit takes no query parameters (unlike usage/costs), so only
+        # append "?..." when there is actually a non-empty query string.
+        query = urllib.parse.urlencode(params, doseq=True)
+        url = f"{self.base_url}{path}" + (f"?{query}" if query else "")
         request = urllib.request.Request(
             url,
             headers={
@@ -199,6 +213,88 @@ class OpenAIUsageCostCollector:
                 )
         return rows
 
+    def _normalize_spend_limit(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        # The organization's hard spend limit (GET /organization/spend_limit)
+        # is a configuration snapshot, not consumption history. It is tagged
+        # metric_kind="budget" and is never persisted as a UsageRecord — see
+        # PERSISTABLE_METRIC_KINDS in app/collectors/types.py and the
+        # persistence policy in docs/vendor-collector-production-readiness.md
+        # (a metric_kind="budget" row becomes an unsupported_metric_kind
+        # import outcome, exactly like Gemini's metric_kind="quota" rows).
+        #
+        # spend_limit has no start_time/end_time in the official response
+        # shape (unlike usage/costs buckets) — there is no vendor-provided
+        # period to use. Following the same convention already established
+        # by GeminiUsageCostCollector._normalize_quota (app/collectors/
+        # gemini_collector.py) for the same "point-in-time configuration
+        # snapshot, not a time series" situation, we use the actual
+        # collection instant as a zero-width-avoiding [now-1us, now) period:
+        # this honestly represents "the limit as observed right now" rather
+        # than fabricating a fake bucket width.
+        #
+        # threshold_amount is documented in cents (integer); it is divided
+        # by 100 here to normalize to USD, matching this collector's other
+        # usd-denominated rows (see _normalize_costs).
+        #
+        # bucket_width means "vendor-reported bucket size of a usage/cost
+        # time series" (e.g. "1d"/"1h"/"1m" — see _normalize_usage/
+        # _normalize_costs). spend_limit's `interval` is a different concept
+        # entirely: the period over which the hard spend threshold is
+        # evaluated, not a data bucket width. It is therefore never placed
+        # into bucket_width (left None here) and instead carried in
+        # metadata["interval"], alongside metadata["enforcement_status"].
+        #
+        # Current OpenAI API contract (GET /organization/spend_limit)
+        # defines: object="organization.spend_limit", currency="USD",
+        # interval="month", enforcement.status in {"inactive", "enforcing"}.
+        # Unknown, missing, or malformed values for any of these fields are
+        # treated as contract drift and rejected — no row is produced,
+        # never fabricated or passed through unvalidated.
+        if not isinstance(payload, dict):
+            return []
+        if payload.get("object") != "organization.spend_limit":
+            return []
+        if payload.get("interval") != "month":
+            return []
+        enforcement = payload.get("enforcement")
+        if not isinstance(enforcement, dict):
+            return []
+        enforcement_status = enforcement.get("status")
+        if enforcement_status not in ("inactive", "enforcing"):
+            return []
+        # threshold_amount must itself be a JSON number, not merely a value
+        # float() can coerce — _safe_finite_float (used by _normalize_usage/
+        # _normalize_costs) accepts numeric strings, which is appropriate
+        # there but would let something like "10000" pass this fail-closed
+        # contract check silently. bool is checked first because Python's
+        # bool is an int subclass (isinstance(True, int) is True).
+        raw_threshold = payload.get("threshold_amount")
+        if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
+            return []
+        threshold_cents = float(raw_threshold)
+        if not math.isfinite(threshold_cents) or threshold_cents <= 0:
+            return []
+        if payload.get("currency") != "USD":
+            return []
+        observed_at = now_local()
+        period_start = observed_at - timedelta(microseconds=1)
+        period_end = observed_at
+        return [
+            self._row(
+                model_name="organization_spend_limit",
+                limit_type="spend_limit",
+                metric_kind="budget",
+                used_value=threshold_cents / 100.0,
+                unit="usd",
+                recorded_at=str(int(observed_at.timestamp())),
+                period_start=period_start,
+                period_end=period_end,
+                project_id=None,
+                bucket_width=None,
+                metadata_extra={"enforcement_status": enforcement_status, "interval": "month"},
+            )
+        ]
+
     @staticmethod
     def _recorded_at_label(bucket: dict[str, Any]) -> str:
         value = bucket.get("end_time")
@@ -230,6 +326,8 @@ class OpenAIUsageCostCollector:
         period_start: Any,
         period_end: Any,
         project_id: str | None,
+        bucket_width: str | None = "1d",
+        metadata_extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         # Returns a plain dict, not a validated CollectorNormalizedRecord —
         # period_start/period_end (unix timestamps per the official response
@@ -240,6 +338,9 @@ class OpenAIUsageCostCollector:
         # reject downstream (surfaced as an "invalid_record" import outcome
         # for dry_run, or the existing whole-batch rollback for a real
         # import).
+        metadata: dict[str, Any] = {"project_id": project_id}
+        if metadata_extra:
+            metadata.update(metadata_extra)
         return {
             "vendor": "openai",
             "service_provider": "OpenAI",
@@ -251,8 +352,8 @@ class OpenAIUsageCostCollector:
             "recorded_at": recorded_at,
             "period_start": period_start,
             "period_end": period_end,
-            "bucket_width": "1d",
+            "bucket_width": bucket_width,
             "source_type": "api_openai_management",
             "project_id": project_id,
-            "metadata": {"project_id": project_id},
+            "metadata": metadata,
         }

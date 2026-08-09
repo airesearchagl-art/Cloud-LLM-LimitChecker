@@ -174,7 +174,7 @@ ALLOW_PAID_MODEL_CALLS=false
 
 `OPENAI_API_KEY` は**Organization Admin API key**(Organization → Admin keysで作成)である必要があります。通常の(project-scoped)APIキーではusage/costs管理APIにアクセスできません。`ALLOW_PAID_MODEL_CALLS=false` のまま使います。まずは `POST /api/collect/openai?dry_run=true` を推奨します。
 
-OpenAI側でもspend cap / budget limitを設定してください。ただし公式APIにはbudget/spend capの**読み取り**専用エンドポイントが見つかっておらず(設定用のPOSTのみ確認)、このCollectorはbudget値を取得しません。ChatGPT Web版の残メッセージ数やPlus/ProのWeb利用枠はOpenAI APIのusage/cost Collectorでは取得対象外です。
+OpenAI側でもspend cap / budget limitを設定してください。公式APIには`GET /v1/organization/spend_limit`（読み取り専用、Admin API key必須）が存在し、このCollectorも取得します。ただし取得したbudget値（`metric_kind="budget"`）は既存のpersistence policyに従い`usage_records`へは保存されません（quota同様、`unsupported_metric_kind`として扱われます）。書き込み(`POST`)・削除(`DELETE`)のspend_limit APIはこのCollectorから一切呼びません。ChatGPT Web版の残メッセージ数やPlus/ProのWeb利用枠はOpenAI APIのusage/cost Collectorでは取得対象外です。
 
 ### OpenAI Collector dry-run and permissions
 
