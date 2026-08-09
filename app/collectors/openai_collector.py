@@ -262,8 +262,17 @@ class OpenAIUsageCostCollector:
         enforcement_status = enforcement.get("status")
         if enforcement_status not in ("inactive", "enforcing"):
             return []
-        threshold_cents = self._safe_finite_float(payload.get("threshold_amount"))
-        if threshold_cents <= 0:
+        # threshold_amount must itself be a JSON number, not merely a value
+        # float() can coerce — _safe_finite_float (used by _normalize_usage/
+        # _normalize_costs) accepts numeric strings, which is appropriate
+        # there but would let something like "10000" pass this fail-closed
+        # contract check silently. bool is checked first because Python's
+        # bool is an int subclass (isinstance(True, int) is True).
+        raw_threshold = payload.get("threshold_amount")
+        if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
+            return []
+        threshold_cents = float(raw_threshold)
+        if not math.isfinite(threshold_cents) or threshold_cents <= 0:
             return []
         if payload.get("currency") != "USD":
             return []

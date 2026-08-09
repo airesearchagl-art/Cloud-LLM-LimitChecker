@@ -385,6 +385,21 @@ def test_openai_collector_spend_limit_converts_cents_to_usd() -> None:
     assert rows[0]["used_value"] == 100.0
 
 
+def test_openai_collector_spend_limit_accepts_float_threshold_amount() -> None:
+    # A genuine JSON number (not a numeric string) is accepted whether it
+    # arrives as an int or a float.
+    class FakeSpendLimit(OpenAIUsageCostCollector):
+        def _get_json(self, path, params):
+            if path.endswith("/organization/spend_limit"):
+                return {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": 10050.0}
+            return {"data": []}
+
+    rows = FakeSpendLimit(api_key="test-key").collect()
+
+    assert len(rows) == 1
+    assert rows[0]["used_value"] == 100.5
+
+
 def test_openai_collector_spend_limit_row_shape() -> None:
     class FakeSpendLimit(OpenAIUsageCostCollector):
         def _get_json(self, path, params):
@@ -463,6 +478,9 @@ def test_openai_collector_spend_limit_enforcement_status_inactive_is_valid_row()
         {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": "Infinity"},
         {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": 0},
         {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": -100},
+        {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": "10000"},
+        {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": True},
+        {**_VALID_SPEND_LIMIT_PAYLOAD, "threshold_amount": False},
         {**_VALID_SPEND_LIMIT_PAYLOAD, "currency": "eur"},
         {**_VALID_SPEND_LIMIT_PAYLOAD, "currency": "usd"},
         {k: v for k, v in _VALID_SPEND_LIMIT_PAYLOAD.items() if k != "currency"},
@@ -480,6 +498,9 @@ def test_openai_collector_spend_limit_malformed_payload_produces_no_row(payload:
     # (exact case -- "usd" is rejected, no implicit normalization), and
     # missing/non-finite/<=0 threshold_amount are all treated as contract
     # drift -- no row is produced (never fabricated or passed through).
+    # threshold_amount must be a genuine JSON number: a numeric-looking
+    # string ("10000") or a bool (True/False, an int subclass in Python)
+    # must also be rejected, not coerced.
     class FakeSpendLimit(OpenAIUsageCostCollector):
         def _get_json(self, path, params):
             if path.endswith("/organization/spend_limit"):

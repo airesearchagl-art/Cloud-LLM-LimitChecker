@@ -13,7 +13,7 @@
 
 - Usage/Costs API: https://developers.openai.com/cookbook/examples/completions_usage_api
 - Project rate limits API: https://developers.openai.com/api/reference/go/resources/admin/subresources/organization/subresources/projects/subresources/rate_limits/methods/list_rate_limits
-- Spend limits (read + write): https://developers.openai.com/api/docs/guides/spend-limits (guide) / https://developers.openai.com/api/reference/go/resources/admin/subresources/organization/subresources/spend_limit/methods/retrieve (GET reference, confirmed via two independent fetches with consistent response-shape detail including the Go SDK method signature)
+- Spend limits (read + write): https://developers.openai.com/api/docs/guides/spend-limits (guide) / https://developers.openai.com/api/reference/go/resources/admin/subresources/organization/subresources/spend_limit/methods/retrieve (GET reference)
 
 `platform.openai.com/docs/api-reference/*` は本調査時点でWebFetchが403を返したため、上記の `developers.openai.com` 系ページ（ミラー/後継ドキュメント）を一次情報として使用した。
 
@@ -44,7 +44,7 @@
 | `GET /v1/organization/usage/completions` | usage | 明示的なGA/Betaラベルなし（deprecation notice無し） | Bearer (Admin API key) | Organization Admin key（通常keyでは不可） | project_ids / user_ids / api_key_ids / modelsでfilter可 | `page` request param / `next_page` response field | `1m`/`1h`/`1d`（既定`1d`） | input_tokens / output_tokens / input_cached_tokens / num_model_requests（別フィールド） | — | cookbook | 実装済みだがpaginationが未実装だった → 本PRで追加 | **Supported** |
 | `GET /v1/organization/costs` | cost | 同上 | 同上 | 同上 | project_ids、group_by: line_item / project_id | 同上（`bucket_width`は`1d`のみ） | `1d`のみ | `amount: {value, currency}`（decimal float） | usd | cookbook | 実装済み・値の形は一致 | **Supported** |
 | `GET /v1/organization/projects/{id}/rate_limits` | quota（設定値、残量ではない） | 同上 | Bearer (Admin key) | Admin key | project単位、cursor pagination(`first_id`/`last_id`/`has_more`) | あり | — | max_requests_per_1_minute等 | — | API reference | **未実装**（実装対象外、本PRのscope外） | **Partial**（公式仕様Supported・実装Unsupported） |
-| `GET /v1/organization/spend_limit` | budget（設定値のsnapshot、消費履歴ではない） | 明示的なGA/Betaラベルなし | Bearer (Admin API key) | Organization Admin key（通常keyでは不可） | organization単位 | なし（単一object、pagination不要） | なし（point-in-time snapshot。Gemini quotaと同様にperiod概念が無いため、収集時刻を`[now-1us, now)`として使用） | `threshold_amount`（cents, int64）/ `currency`（USD固定）/ `interval`（month固定）/ `enforcement.status` | usd | developers.openai.com API reference（spend_limit/methods/retrieve） | 旧調査（2026-08-07）は「読み取り専用endpointが見つからない」と誤って記録していた（当時見落とし。原因は断定しない） → 本PRでGET実装を追加。`metric_kind="budget"`としてnormalizeし、既存persistence policyによりusage_recordsへは保存しない（quotaと同様） | **Supported**（実装済み） |
+| `GET /v1/organization/spend_limit` | budget（設定値のsnapshot、消費履歴ではない） | 明示的なGA/Betaラベルなし | Bearer (Admin API key) | Organization Admin key（通常keyでは不可） | organization単位 | なし（単一object、pagination不要） | なし（point-in-time snapshot。Gemini quotaと同様にperiod概念が無いため、収集時刻を`[now-1us, now)`として使用） | `threshold_amount`（number, cents）/ `currency`（USD固定）/ `interval`（month固定）/ `enforcement.status` | usd | developers.openai.com API reference（spend_limit/methods/retrieve） | 旧調査（2026-08-07）は「読み取り専用endpointが見つからない」と誤って記録していた（当時見落とし。原因は断定しない） → 本PRでGET実装を追加。`metric_kind="budget"`としてnormalizeし、既存persistence policyによりusage_recordsへは保存しない（quotaと同様） | **Supported**（実装済み） |
 
 `POST`/`DELETE /v1/organization/spend_limit`（spend limitの書き込み・削除）も公式に存在するが、このアプリはこれらを一切呼ばない（GETのみ）。
 
