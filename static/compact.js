@@ -458,10 +458,21 @@ function githubActionsBillingStatusClass(status) {
   return "compact-status-unknown";
 }
 
-const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
-  usage_breakdown_inconclusive: "使用内訳: 判定不可",
-  plan_unknown: "Plan不明",
-};
+// data.plan_name(API生値)を表示用ラベルへ変換する純粋関数。app.js側とは
+// モジュール分離のためimportせず、ここに独立して複製する。
+function githubActionsBillingPlanLabel(planName) {
+  if (planName === "free") return "Free";
+  if (planName === "pro") return "Pro";
+  return planName || "不明";
+}
+
+// discounted_standard_minutes等の参考値専用フォーマッタ。fmtNumberはnull/undefinedを
+// 「未取得」という長い日本語ラベルに変換するが、この密なinline行では「—」の方が
+// 目的に合う。0は0のまま表示し、null/undefinedのみ「—」にする(silent 0化を防ぐ)。
+function fmtExactOrDash(value) {
+  if (value === null || value === undefined) return "—";
+  return fmtNumber(value);
+}
 
 // cardId(例: "github-actions.billing")はレイアウトカスタマイズ用のstable ID。
 // 呼び出し元(githubActionsBillingSectionHtml)が明示的に渡す。
@@ -481,32 +492,32 @@ function githubActionsBillingCardHtml(data, cardId = null) {
       <article class="compact-card compact-provider-github"${cardIdAttr}>
         <div class="compact-card-head">
           <span class="compact-service-name">GitHub Actions</span>
-          <span class="compact-source-badge">${escapeHtml(data.plan_name || "不明")}</span>
+          <span class="compact-source-badge">Plan不明</span>
         </div>
-        <div class="compact-no-limit">Monthly allowance: — / Exact used: — / Exact remaining: —（"Plan: read"権限を確認してください）</div>
+        <div class="compact-no-limit">月間枠を判定できません（"Plan: read"権限を確認）</div>
       </article>`;
   }
 
   const monthLabel = `${data.billing_year}-${String(data.billing_month).padStart(2, "0")}`;
-  const discountedText = fmtNumber(data.discounted_standard_minutes);
-  const billableText = fmtNumber(data.billable_standard_minutes);
-  const nonIncludedText = fmtNumber(data.paid_non_included_minutes);
+  const planLabel = githubActionsBillingPlanLabel(data.plan_name);
+  const allowanceText = fmtNumber(data.included_minutes);
+  const discountedText = fmtExactOrDash(data.discounted_standard_minutes);
+  const billableText = fmtExactOrDash(data.billable_standard_minutes);
+  const nonIncludedText = fmtExactOrDash(data.paid_non_included_minutes);
 
   return `
     <article class="compact-card compact-provider-github"${cardIdAttr}>
       <div class="compact-card-head">
         <span class="compact-service-name">GitHub Actions</span>
-        <span class="compact-source-badge">${escapeHtml(data.plan_name || "-")}</span>
+        <span class="compact-source-badge">${escapeHtml(planLabel)}</span>
       </div>
       <div class="compact-card-body">
         <div class="compact-card-left">
-          <div class="compact-usage-line">Monthly allowance ${fmtNumber(data.included_minutes)} min</div>
-          <div class="compact-usage-line">Exact used — / Exact remaining —</div>
-          <div class="compact-usage-line">Discounted standard ${discountedText} / Billable standard ${billableText} min</div>
-          <div class="compact-usage-line">Non-included paid ${nonIncludedText} min</div>
+          <div class="compact-usage-line">月間枠 ${allowanceText}分 ／ 参考利用 ${discountedText}分</div>
+          <div class="compact-usage-line">課金対象 ${billableText}分 ／ 追加課金 ${nonIncludedText}分</div>
         </div>
       </div>
-      <div class="compact-stale-notice">${escapeHtml(monthLabel)} ／ ${escapeHtml(data.source || "-")} ／ exact remainingはPublic Previewでは判定不可</div>
+      <div class="compact-stale-notice">残り分数は判定不可 ／ ${escapeHtml(monthLabel)}</div>
     </article>`;
 }
 
@@ -1505,6 +1516,7 @@ if (typeof module !== "undefined") {
     githubAutoRefreshNoticeHtml,
     githubSectionHtml,
     githubActionsBillingStatusClass,
+    githubActionsBillingPlanLabel,
     githubActionsBillingCardHtml,
     githubActionsBillingSectionHtml,
     compactProviderErrorMessage,

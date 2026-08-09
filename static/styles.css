@@ -721,6 +721,49 @@ button:hover {
   margin-top: 12px;
 }
 
+.github-billing-summary {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+}
+
+.github-billing-row {
+  align-items: baseline;
+  display: flex;
+  font-size: 14px;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+
+.github-billing-label {
+  color: #62717a;
+  font-weight: 600;
+}
+
+.github-billing-value {
+  font-weight: 700;
+}
+
+.github-billing-note {
+  font-size: 12px;
+  margin: 6px 0 2px;
+}
+
+.github-billing-details {
+  font-size: 12px;
+  margin: 2px 0;
+}
+
+.github-billing-details summary {
+  color: #1f6673;
+  cursor: pointer;
+}
+
+.github-billing-meta {
+  font-size: 11px;
+  margin-top: 4px;
+}
+
 .github-resource-card {
   background: #f7f9fa;
   border-radius: 8px;

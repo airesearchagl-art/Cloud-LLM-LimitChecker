@@ -105,30 +105,41 @@ def test_app_not_fetched_shows_未取得():
 
 
 def test_app_never_fabricates_exact_used_or_remaining():
-    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
-    assert "Exact used: —" in html
-    assert "Exact remaining: —" in html
+    # Even if the backend ever sent numbers here (it never should -- these
+    # fields are always None -- see app/github_actions_billing.py), the
+    # frontend must not read or render them anywhere.
+    suspicious = with_overrides(used_included_minutes=999999, remaining_minutes=888888, usage_percentage=42.5)
+    html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(suspicious)})")
+    assert "999999" not in html
+    assert "888888" not in html
+    assert "42.5" not in html
     assert "undefined" not in html
+    assert "NaN" not in html
+    # the honest "cannot be determined" note must still be shown instead
+    assert "判定できません" in html
 
 
 def test_app_shows_monthly_allowance_from_plan():
     html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
     assert "3,000" in html or "3000" in html
-    assert "Monthly allowance" in html
+    assert "月間枠" in html
 
 
 def test_app_shows_safely_named_breakdown_fields_not_included_quota_language():
     html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(INCONCLUSIVE_DATA)})")
-    assert "Discounted standard usage" in html
-    assert "Billable standard usage" in html
-    assert "Non-included paid minutes" in html
+    assert "参考利用" in html
+    assert "課金対象" in html
+    assert "追加課金" in html
     # must never claim these numbers are the plan's included-quota consumption
     assert "Overage" not in html
+    assert "超過" not in html
 
 
-def test_app_plan_unknown_shows_dash_not_zero():
+def test_app_plan_unknown_shows_no_fabricated_allowance():
     html = run_app_js(f"app.githubActionsBillingHtml({json.dumps(PLAN_UNKNOWN_DATA)})")
-    assert "—" in html
+    assert "Plan不明" in html
+    # no numeric allowance table must be rendered when the plan itself is unknown
+    assert "github-billing-summary" not in html
     assert ">0<" not in html
     assert "undefined" not in html
 
@@ -197,20 +208,25 @@ def test_compact_not_fetched_card_has_card_id():
 
 
 def test_compact_never_fabricates_exact_used_or_remaining():
+    suspicious = with_overrides(used_included_minutes=999999, remaining_minutes=888888, usage_percentage=42.5)
     html = run_compact_js(
-        f'compact.githubActionsBillingCardHtml({json.dumps(INCONCLUSIVE_DATA)}, "github-actions.billing")'
+        f'compact.githubActionsBillingCardHtml({json.dumps(suspicious)}, "github-actions.billing")'
     )
     assert 'data-card-id="github-actions.billing"' in html
-    assert "Exact used —" in html
-    assert "Exact remaining —" in html
+    assert "999999" not in html
+    assert "888888" not in html
+    assert "42.5" not in html
     assert "undefined" not in html
+    assert "NaN" not in html
+    assert "判定不可" in html
 
 
-def test_compact_plan_unknown_card_shows_dash():
+def test_compact_plan_unknown_card_shows_no_fabricated_allowance():
     html = run_compact_js(
         f'compact.githubActionsBillingCardHtml({json.dumps(PLAN_UNKNOWN_DATA)}, "github-actions.billing")'
     )
-    assert "—" in html
+    assert "Plan不明" in html
+    assert "compact-usage-line" not in html
     assert "undefined" not in html
 
 
@@ -229,10 +245,11 @@ def test_compact_shows_safely_named_breakdown_not_overage():
     html = run_compact_js(
         f'compact.githubActionsBillingCardHtml({json.dumps(INCONCLUSIVE_DATA)}, "github-actions.billing")'
     )
-    assert "Discounted standard" in html
-    assert "Billable standard" in html
-    assert "Non-included paid" in html
+    assert "参考利用" in html
+    assert "課金対象" in html
+    assert "追加課金" in html
     assert "Overage" not in html
+    assert "超過" not in html
 
 
 def test_app_and_compact_never_conflate_with_rate_limit_labels():

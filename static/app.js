@@ -388,13 +388,14 @@ function githubActionsBillingStatusClass(status) {
   return "";
 }
 
-const GITHUB_ACTIONS_BILLING_STATUS_LABEL = {
-  usage_breakdown_inconclusive: "使用内訳: 判定不可",
-  plan_unknown: "Plan不明",
-};
-
 // null/undefinedは"—"(未取得の"未取得"表記とは区別し、"exact値が原理的に無い"ことを示す)。
 const fmtExactOrDash = (value) => (value === null || value === undefined ? "—" : fmtNumber(value));
+
+function githubActionsBillingPlanLabel(planName) {
+  if (planName === "free") return "Free";
+  if (planName === "pro") return "Pro";
+  return planName || "不明";
+}
 
 // The only text ever shown for a non-429 refresh failure — deliberately never
 // derived from the response body (no `.text()`, never passed into an Error),
@@ -463,44 +464,34 @@ function githubActionsBillingCardHtml(data, isStale) {
   if (data.status === "plan_unknown" || data.included_minutes === null || data.included_minutes === undefined) {
     return `
       ${staleNoticeHtml}
-      <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")} — Plan不明</div>
-      <p class="form-note">Planを安全に認識できないため、Monthly allowanceを判定していません。現在のGitHub credentialに"Plan: read"権限（"user" scope）があるか確認してください。</p>
-      <div class="github-resource-cards">
-        <div class="github-resource-card">
-          <div class="github-resource-name">GitHub Actions</div>
-          <div>Monthly allowance: —</div>
-          <div>Exact used: —</div>
-          <div>Exact remaining: —</div>
-        </div>
-      </div>`;
+      <div class="github-overall ${statusClass}">GitHub Actions — Plan不明</div>
+      <p class="form-note">Planを認識できないため月間枠を判定できません。&quot;Plan: read&quot;権限（&quot;user&quot; scope）を確認してください。</p>`;
   }
 
+  const planLabel = escapeHtml(githubActionsBillingPlanLabel(data.plan_name));
   const allowanceText = fmtNumber(data.included_minutes);
   const discountedText = fmtExactOrDash(data.discounted_standard_minutes);
   const billableText = fmtExactOrDash(data.billable_standard_minutes);
   const nonIncludedText = fmtExactOrDash(data.paid_non_included_minutes);
+  const year = escapeHtml(String(data.billing_year));
+  const monthPadded = escapeHtml(String(data.billing_month).padStart(2, "0"));
 
   return `
     ${staleNoticeHtml}
-    <div class="github-overall ${statusClass}">Plan: ${escapeHtml(data.plan_name || "不明")}</div>
-    <div class="github-resource-cards">
-      <div class="github-resource-card">
-        <div class="github-resource-name">GitHub Actions</div>
-        <div>Monthly allowance: ${allowanceText} min</div>
-        <div>Exact used: —</div>
-        <div>Exact remaining: —</div>
-      </div>
+    <div class="github-overall ${statusClass}">GitHub Actions</div>
+    <div class="github-billing-summary">
+      <div class="github-billing-row"><span class="github-billing-label">プラン</span><span class="github-billing-value">${planLabel}</span></div>
+      <div class="github-billing-row"><span class="github-billing-label">月間枠</span><span class="github-billing-value">${allowanceText}分</span></div>
+      <div class="github-billing-row"><span class="github-billing-label">参考利用</span><span class="github-billing-value">${discountedText}分</span></div>
+      <div class="github-billing-row"><span class="github-billing-label">課金対象</span><span class="github-billing-value">${billableText}分</span></div>
+      <div class="github-billing-row"><span class="github-billing-label">追加課金</span><span class="github-billing-value">${nonIncludedText}分</span></div>
     </div>
-    <p class="form-note">Exact remainingは、現在の公式Billing summary（Public Preview）だけでは判定できません。discountにはincluded allowance消費分だけでなく、publicリポジトリのstandard runner利用やself-hosted runner利用の割引も混在するためです。</p>
-    <div class="github-resource-cards">
-      <div class="github-resource-card">
-        <div class="github-resource-name">内訳（参考値。exactなquota消費量ではありません）</div>
-        <div>Discounted standard usage: ${discountedText} min</div>
-        <div>Billable standard usage: ${billableText} min</div>
-        <div>Non-included paid minutes: ${nonIncludedText} min</div>
-      </div>
-    </div>
-    <p class="form-note">対象月: ${escapeHtml(String(data.billing_year))}-${String(data.billing_month).padStart(2, "0")} ／ 取得元: ${escapeHtml(data.source || "-")} ／ 最終取得: ${escapeHtml(fmtGithubDate(data.collected_at))}</p>`;
+    <p class="github-billing-note">正確な残り分数はGitHub公式Billing summaryだけでは判定できません。</p>
+    <details class="github-billing-details">
+      <summary>詳細を表示</summary>
+      <p class="form-note">discountにはincluded allowance消費分だけでなく、publicリポジトリのstandard runner利用やself-hosted runner利用の割引も混在するため、GitHub公式Billing summary（Public Preview）だけではexact remainingを判定できません。「参考利用」「課金対象」「追加課金」はいずれも意味を限定した参考値で、正確なquota消費量ではありません。</p>
+    </details>
+    <p class="muted github-billing-meta">${year}-${monthPadded} ／ 最終取得: ${escapeHtml(fmtGithubDate(data.collected_at))}</p>`;
 }
 
 function renderGithubActionsBilling(data) {
@@ -1435,6 +1426,7 @@ if (typeof module !== "undefined") {
     githubLimitedBannerHtml,
     githubSecondaryRateLimitBannerHtml,
     githubActionsBillingStatusClass,
+    githubActionsBillingPlanLabel,
     githubActionsBillingHtml,
     githubActionsBillingCardHtml,
     githubActionsBillingErrorDisplay,
