@@ -52,12 +52,19 @@ def test_default_layout_state_shows_everything():
 
 def test_default_section_order_includes_all_known_sections():
     order = run_compact_js("compact.DEFAULT_SECTION_ORDER")
-    assert order == ["section.dashboard", "section.github", "section.claude", "section.codex"]
+    assert order == [
+        "section.dashboard",
+        "section.github",
+        "section.github-actions",
+        "section.claude",
+        "section.codex",
+    ]
 
 
 def test_default_card_order_matches_documented_stable_ids():
     meta = run_compact_js("compact.CARD_META_BY_SECTION")
     assert [c["id"] for c in meta["section.github"]] == ["github.core", "github.graphql", "github.search"]
+    assert [c["id"] for c in meta["section.github-actions"]] == ["github-actions.billing"]
     assert [c["id"] for c in meta["section.claude"]] == ["claude.five_hour", "claude.seven_day"]
     assert [c["id"] for c in meta["section.codex"]] == ["codex.five_hour", "codex.weekly"]
 
@@ -95,12 +102,24 @@ def test_move_id_to_index_unknown_id_is_noop():
 def test_sanitize_accepts_reordered_section_order():
     raw = {
         "version": 1,
-        "sectionOrder": ["section.codex", "section.claude", "section.github", "section.dashboard"],
+        "sectionOrder": [
+            "section.codex",
+            "section.claude",
+            "section.github-actions",
+            "section.github",
+            "section.dashboard",
+        ],
         "cardOrderBySection": {},
         "hiddenCardIds": [],
     }
     state = run_compact_js(f"compact.sanitizeLayoutState({json.dumps(raw)})")
-    assert state["sectionOrder"] == ["section.codex", "section.claude", "section.github", "section.dashboard"]
+    assert state["sectionOrder"] == [
+        "section.codex",
+        "section.claude",
+        "section.github-actions",
+        "section.github",
+        "section.dashboard",
+    ]
 
 
 def test_sanitize_accepts_reordered_card_order_within_section():
@@ -154,9 +173,16 @@ def test_sanitize_rejects_cross_provider_id_even_if_it_is_a_known_card_elsewhere
 def test_serialize_and_load_round_trip_preserves_custom_layout():
     custom = {
         "version": 1,
-        "sectionOrder": ["section.codex", "section.github", "section.claude", "section.dashboard"],
+        "sectionOrder": [
+            "section.codex",
+            "section.github",
+            "section.github-actions",
+            "section.claude",
+            "section.dashboard",
+        ],
         "cardOrderBySection": {
             "section.github": ["github.graphql", "github.core", "github.search"],
+            "section.github-actions": ["github-actions.billing"],
             "section.claude": ["claude.seven_day", "claude.five_hour"],
             "section.codex": ["codex.weekly", "codex.five_hour"],
         },
@@ -264,7 +290,13 @@ def test_missing_ids_are_appended_at_end_in_default_order():
         "hiddenCardIds": [],
     }
     state = run_compact_js(f"compact.sanitizeLayoutState({json.dumps(raw)})")
-    assert state["sectionOrder"] == ["section.codex", "section.dashboard", "section.github", "section.claude"]
+    assert state["sectionOrder"] == [
+        "section.codex",
+        "section.dashboard",
+        "section.github",
+        "section.github-actions",
+        "section.claude",
+    ]
     assert state["cardOrderBySection"]["section.github"] == ["github.search", "github.core", "github.graphql"]
 
 
