@@ -13,7 +13,7 @@
 
 - Usage/Costs API: https://developers.openai.com/cookbook/examples/completions_usage_api
 - Project rate limits API: https://developers.openai.com/api/reference/go/resources/admin/subresources/organization/subresources/projects/subresources/rate_limits/methods/list_rate_limits
-- Spend limits (書き込み専用): https://developers.openai.com/api/docs/guides/spend-limits
+- Spend limits (read + write): https://developers.openai.com/api/docs/guides/spend-limits (guide) / https://developers.openai.com/api/reference/go/resources/admin/subresources/organization/subresources/spend_limit/methods/retrieve (GET reference, confirmed via two independent fetches with consistent response-shape detail including the Go SDK method signature)
 
 `platform.openai.com/docs/api-reference/*` は本調査時点でWebFetchが403を返したため、上記の `developers.openai.com` 系ページ（ミラー/後継ドキュメント）を一次情報として使用した。
 
@@ -44,7 +44,9 @@
 | `GET /v1/organization/usage/completions` | usage | 明示的なGA/Betaラベルなし（deprecation notice無し） | Bearer (Admin API key) | Organization Admin key（通常keyでは不可） | project_ids / user_ids / api_key_ids / modelsでfilter可 | `page` request param / `next_page` response field | `1m`/`1h`/`1d`（既定`1d`） | input_tokens / output_tokens / input_cached_tokens / num_model_requests（別フィールド） | — | cookbook | 実装済みだがpaginationが未実装だった → 本PRで追加 | **Supported** |
 | `GET /v1/organization/costs` | cost | 同上 | 同上 | 同上 | project_ids、group_by: line_item / project_id | 同上（`bucket_width`は`1d`のみ） | `1d`のみ | `amount: {value, currency}`（decimal float） | usd | cookbook | 実装済み・値の形は一致 | **Supported** |
 | `GET /v1/organization/projects/{id}/rate_limits` | quota（設定値、残量ではない） | 同上 | Bearer (Admin key) | Admin key | project単位、cursor pagination(`first_id`/`last_id`/`has_more`) | あり | — | max_requests_per_1_minute等 | — | API reference | **未実装**（実装対象外、本PRのscope外） | **Partial**（公式仕様Supported・実装Unsupported） |
-| `POST /v1/organization/spend_limit` | budget（書き込みのみ） | 同上 | Bearer (Admin key) | Admin key | organization単位 | — | — | `{threshold_amount: cents, currency: USD, interval: month}` | usd | spend-limits guide | 読み取り専用endpointが見つからない → 未実装（実装できない） | **Unsupported**（読み取りAPI自体がNot Found） |
+| `GET /v1/organization/spend_limit` | budget（設定値のsnapshot、消費履歴ではない） | 明示的なGA/Betaラベルなし | Bearer (Admin API key) | Organization Admin key（通常keyでは不可） | organization単位 | なし（単一object、pagination不要） | なし（point-in-time snapshot。Gemini quotaと同様にperiod概念が無いため、収集時刻を`[now-1us, now)`として使用） | `threshold_amount`（cents, int64）/ `currency`（USD固定）/ `interval`（month固定）/ `enforcement.status` | usd | developers.openai.com API reference（spend_limit/methods/retrieve） | 旧調査（2026-08-07）は「読み取り専用endpointが見つからない」と誤って記録していた（当時見落とし。原因は断定しない） → 本PRでGET実装を追加。`metric_kind="budget"`としてnormalizeし、既存persistence policyによりusage_recordsへは保存しない（quotaと同様） | **Supported**（実装済み） |
+
+`POST`/`DELETE /v1/organization/spend_limit`（spend limitの書き込み・削除）も公式に存在するが、このアプリはこれらを一切呼ばない（GETのみ）。
 
 ### Google Cloud / Gemini
 
@@ -78,6 +80,7 @@
 - **Enforcement gap**: `app/safety.py`の`assert_paid_model_calls_allowed`が定義されているが、`tests/test_safety.py`以外のどこからも呼ばれていない（本番コードパスで未使用）。実際の防御は「Collectorが最初から推論APIを呼ばない実装になっていること」と`tests/test_no_paid_model_calls.py`の静的文字列検査に依存している。本PRでは配線の追加は行わず、事実として記録する（Collectorが推論APIを呼ぶコードは依然として存在しない）。
 - **Convention gap**: READMEの一部が「`usage_records`への保存はまだ行いません」と記載していたが、実装は既に`dry_run=false`で保存を行っていた（`finish_collector_import` → `import_normalized_records`）。本PRでREADMEの記述を実装に合わせて修正。
 - **False positive（否定できた候補）**: 「Gemini APIキーがquery paramへ入る」という設計自体は事実だったが、実際に外部へ送信される経路（`collect()`から到達可能な経路）は存在しなかった。Confirmed defectとして扱いコードは削除したが、「稼働中に実際にキーが漏洩していた」という意味でのIncidentではない。
+- **Confirmed defect（過去の調査記録の誤り）**: 2026-08-07時点の調査で「OpenAI budget/spend-capは書き込み専用、読み取りendpointが見つからない」と記録していたが、2026-08時点の再調査でOpenAI公式に`GET /v1/organization/spend_limit`が存在することを確認した（developers.openai.com、二回の独立したfetchで整合する結果、Go SDKメソッドシグネチャ等の具体的詳細を含む）。当時の調査で見落とされていた可能性が高いが、原因を断定はしない。本PRでGET実装を追加し、本ドキュメントの該当記述を訂正した。
 
 ## 4. 実装したHardening
 
@@ -130,16 +133,16 @@ silent skipはしない。dry_run・実保存いずれも、レコード単位�
 
 **注意**: このセクションの分類は「コード実装が公式仕様と一致しているか」のコードレベル判定であり、`GET /api/collector-preflight`が返す`production_ready`フィールド(4節、実Credentialでの接続確認が完了するまで常に`false`)とは別の軸。両者を混同しないこと — 以下でいう"Implemented"は「実装済みで公式仕様と一致」を意味するだけで、実Credentialでの動作確認(6節のHuman Gate)が済んでいることを意味しない。
 
-- **Implemented（実装済み・公式仕様に一致）**: OpenAI usage/costs、Claude usage/cost report、Gemini usage(Cloud Monitoring、静的OAuth2アクセストークンのみ・ADC未対応)/quota(Service Usage)
+- **Implemented（実装済み・公式仕様に一致）**: OpenAI usage/costs/spend_limit（budget、read-only）、Claude usage/cost report、Gemini usage(Cloud Monitoring、静的OAuth2アクセストークンのみ・ADC未対応)/quota(Service Usage)
 - **Partial（公式APIは存在するが未実装）**: OpenAI project rate limits（quota）、Claude organization rate limits（quota）、Gemini Cloud Billing Budget API
-- **Unsupported（公式に読み取り経路が存在しない、または対象外と明記）**: OpenAI budget読み取り（POSTのみ確認）、Claude spend limits（Console組織では利用不可と公式に明記）
+- **Unsupported（公式に読み取り経路が存在しない、または対象外と明記）**: Claude spend limits（Console組織では利用不可と公式に明記）
 - **Inconclusive**: 本PR内では無し（Gemini APIキーのauth可否は、当初Inconclusive-but-fail-closedとして実装したが、その後の追加調査でConfirmed（OAuth2必須・APIキー不可）に格上げ済み）
 
 ## 6. 実Credential接続のHuman Gate（次のステップ）
 
 以下は本PRでは実施しておらず、ユーザーの明示的な許可のもとで別セッション・別PRとして進める。
 
-- **OpenAI**: Organization Admin API keyでの実接続確認（通常keyでは401/403になることの実地確認を含む）
+- **OpenAI**: Organization Admin API keyでの実接続確認（通常keyでは401/403になることの実地確認を含む）。usage/costsに加え、spend_limit（本PRで追加したGET実装）も同じHuman Gateで確認する
 - **Google Cloud / Gemini**: 静的OAuth2アクセストークン(`GOOGLE_CLOUD_ACCESS_TOKEN`、現行実装が受け付ける唯一の方式)+ プロジェクトIDでの実接続確認。必要IAM: `roles/monitoring.viewer`系（Monitoring Viewer）、`roles/servicemanagement.quotaViewer`（Quota Viewer）。ADCの正式対応(新規dependency追加を伴う)は別途の設計判断として扱う
 - **Anthropic / Claude**: organization Admin API key（`sk-ant-admin01-`）での実接続確認
 
