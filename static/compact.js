@@ -3,6 +3,7 @@ const REFRESH_INTERVAL_MS = 30000;
 const state = {
   dashboard: [],
   github: null,
+  githubGraphqlDiagnostics: null,
   claudeCodeUsage: null,
   claudeDesktopCloudUsage: null,
   codexRateLimits: null,
@@ -34,6 +35,7 @@ const COMPACT_PROVIDER_ERROR_MESSAGES = {
   githubActionsBilling: "GitHub Actions情報の取得に失敗しました",
   claudeCodeUsage: "Claude Code Usageの取得に失敗しました",
   codexUsage: "Codex Usageの取得に失敗しました",
+  githubGraphqlDiagnostics: "GraphQL消費診断の取得に失敗しました",
 };
 
 function compactProviderErrorMessage(providerKey) {
@@ -402,9 +404,48 @@ function githubAutoRefreshNoticeHtml(data) {
   return "";
 }
 
+// DOMに触れない純粋関数: GET /api/github-graphql-diagnostics のレスポンスから
+// section.github内の4枚目のカード(github.graphql-diagnostics)を組み立てる。
+// v0.1では詳細timeline・per-session内訳は表示しない(そもそもそのデータは
+// サーバー側にも存在しない -- 按分/内訳の捏造はしない)。「有効/無効」と
+// 計測中件数のみを示す最小カード。data(GET結果)がnull(=未取得/このprovider
+// のみfetch失敗)の場合でも例外を投げず、cardIdだけは常に埋め込む。
+function githubGraphqlDiagnosticsCompactCardHtml(data, cardId) {
+  const cardIdAttr = cardId ? ` data-card-id="${escapeHtml(cardId)}"` : "";
+
+  if (!data) {
+    return `
+      <article class="compact-card compact-empty compact-provider-github"${cardIdAttr}>
+        GraphQL消費診断: 未取得
+      </article>`;
+  }
+
+  const enabledLabel = data.enabled ? "有効" : "無効";
+  const activeCount = Array.isArray(data.active_sessions) ? data.active_sessions.length : 0;
+  const activeLineHtml =
+    data.enabled && activeCount > 0
+      ? `<div class="compact-usage-line">計測中: ${fmtNumber(activeCount)}件</div>`
+      : "";
+
+  return `
+    <article class="compact-card compact-provider-github"${cardIdAttr}>
+      <div class="compact-card-head">
+        <span class="compact-service-name">GraphQL消費診断</span>
+        <span class="compact-source-badge">${escapeHtml(enabledLabel)}</span>
+      </div>
+      ${activeLineHtml}
+    </article>`;
+}
+
 // DOMに触れない純粋関数: GET /api/github-rate-limit のレスポンスからGitHubセクションのHTMLを組み立てる。
 // REST/GraphQL/Searchは固定順(状態による並び替えをしない)で常に横並び表示する。
-function githubSectionHtml(data) {
+// diagnosticsCardHtml(省略可、既定は""): GET /api/github-graphql-diagnostics由来の
+// 4枚目のカード(githubGraphqlDiagnosticsCompactCardHtmlの出力)。CARD_META_BY_SECTION
+// ["section.github"]のgridSelector(#githubCards .compact-github-grid-inner)が
+// このカードも対象にするため、REST/GraphQL/Searchと同じ.compact-github-grid-inner
+// 要素の中に追加する。省略時(既定"")は従来どおりの出力と完全に一致する
+// (呼び出し元がdiagnostics dataを持っていない既存呼び出し・既存testとの後方互換)。
+function githubSectionHtml(data, diagnosticsCardHtml = "") {
   const autoRefreshNoticeHtml = githubAutoRefreshNoticeHtml(data);
 
   if (!data || !data.fetched) {
@@ -414,7 +455,8 @@ function githubSectionHtml(data) {
       return `
         ${secondaryHtml}
         <div class="compact-card compact-empty compact-provider-github">GitHub Rate Limit: 未取得</div>
-        ${autoRefreshNoticeHtml}`;
+        ${autoRefreshNoticeHtml}
+        ${diagnosticsCardHtml ? `<div class="compact-github-grid-inner">${diagnosticsCardHtml}</div>` : ""}`;
     }
     const resources = data.last_known.resources;
     const overall = data.last_known.overall;
@@ -428,6 +470,7 @@ function githubSectionHtml(data) {
         ${githubResourceCardHtml(resources.core, true)}
         ${githubResourceCardHtml(resources.graphql, true)}
         ${resources.search ? githubResourceCardHtml(resources.search, true) : ""}
+        ${diagnosticsCardHtml}
       </div>`;
   }
 
@@ -439,6 +482,7 @@ function githubSectionHtml(data) {
       ${githubResourceCardHtml(data.resources.core)}
       ${githubResourceCardHtml(data.resources.graphql)}
       ${data.resources.search ? githubResourceCardHtml(data.resources.search) : ""}
+      ${diagnosticsCardHtml}
     </div>`;
 }
 
@@ -850,6 +894,7 @@ const CARD_META_BY_SECTION = {
     { id: "github.core", label: "GitHub REST API" },
     { id: "github.graphql", label: "GitHub GraphQL API" },
     { id: "github.search", label: "GitHub Search API" },
+    { id: "github.graphql-diagnostics", label: "GraphQL消費診断" },
   ],
   "section.github-actions": [{ id: "github-actions.billing", label: "GitHub Actions 月間利用枠" }],
   "section.claude": [
@@ -1384,6 +1429,21 @@ function _compactSafeProviderHtml(providerKey, builder) {
 // 両方成功した場合のみ従来どおり両方を渡す — 片方だけの部分結果を新しい
 // 組み合わせとして渡すことはしない。
 function buildCompactRenderPlan(results) {
+  // githubGraphqlDiagnosticsは新しく追加されたproviderのため、resultsに
+  // このkey自体が無い(=呼び出し元がまだこのproviderを知らない旧来の呼び出し・
+  // 既存test fixture)場合は、"取得失敗"扱いにはせず"未取得"の最小カードへ
+  // fallbackする(fetchJsonSafeの{ok:false}が返す本当の取得失敗とは区別する)。
+  // 実際の取得失敗({ok:false})は他のproviderと全く同じ経路(compactProviderErrorHtml)
+  // で扱い、githubCards全体を巻き込まない -- REST/GraphQL/Searchの3カードは
+  // このproviderの成否と無関係に描画され続ける。
+  const diagnosticsResult = results.githubGraphqlDiagnostics;
+  const githubGraphqlDiagnosticsCardHtml = _compactSafeProviderHtml("githubGraphqlDiagnostics", () => {
+    if (!diagnosticsResult) return githubGraphqlDiagnosticsCompactCardHtml(null, "github.graphql-diagnostics");
+    return diagnosticsResult.ok
+      ? githubGraphqlDiagnosticsCompactCardHtml(diagnosticsResult.data, "github.graphql-diagnostics")
+      : compactProviderErrorHtml("githubGraphqlDiagnostics");
+  });
+
   return {
     limitCards: _compactSafeProviderHtml("dashboard", () => {
       if (!results.dashboard.ok) return compactProviderErrorHtml("dashboard");
@@ -1393,7 +1453,9 @@ function buildCompactRenderPlan(results) {
         : `<div class="compact-card compact-empty">表示できる制限項目がありません。</div>`;
     }),
     githubCards: _compactSafeProviderHtml("github", () =>
-      results.github.ok ? githubSectionHtml(results.github.data) : compactProviderErrorHtml("github")
+      results.github.ok
+        ? githubSectionHtml(results.github.data, githubGraphqlDiagnosticsCardHtml)
+        : compactProviderErrorHtml("github")
     ),
     githubActionsCards: _compactSafeProviderHtml("githubActionsBilling", () =>
       results.githubActionsBilling.ok
@@ -1423,20 +1485,32 @@ function buildCompactRenderPlan(results) {
 // Promise.allを全滅させることはない — 各providerは独立して成功/失敗を判定し、
 // 失敗したprovider「だけ」が固定safe messageへ置き換わる(部分失敗耐性)。
 async function loadCompact() {
-  const [dashboard, github, githubActionsBilling, claudeAuto, claudeManual, codexRateLimits, codexUsage] =
-    await Promise.all([
-      fetchJsonSafe("/api/dashboard"),
-      fetchJsonSafe("/api/github-rate-limit"),
-      fetchJsonSafe("/api/github-actions-billing"),
-      fetchJsonSafe("/api/claude-code-usage"),
-      fetchJsonSafe("/api/claude-code-usage/manual"),
-      fetchJsonSafe("/api/codex-rate-limits"),
-      fetchJsonSafe("/api/codex-usage"),
-    ]);
+  const [
+    dashboard,
+    github,
+    githubActionsBilling,
+    githubGraphqlDiagnostics,
+    claudeAuto,
+    claudeManual,
+    codexRateLimits,
+    codexUsage,
+  ] = await Promise.all([
+    fetchJsonSafe("/api/dashboard"),
+    fetchJsonSafe("/api/github-rate-limit"),
+    fetchJsonSafe("/api/github-actions-billing"),
+    // GET /api/github-graphql-diagnosticsは保存済みcontroller/sampler状態を返すだけの
+    // 読み取り専用endpoint。start/stopはここから一切呼ばない(表示専用)。
+    fetchJsonSafe("/api/github-graphql-diagnostics"),
+    fetchJsonSafe("/api/claude-code-usage"),
+    fetchJsonSafe("/api/claude-code-usage/manual"),
+    fetchJsonSafe("/api/codex-rate-limits"),
+    fetchJsonSafe("/api/codex-usage"),
+  ]);
 
   if (dashboard.ok) state.dashboard = dashboard.data;
   if (github.ok) state.github = github.data;
   if (githubActionsBilling.ok) state.githubActionsBilling = githubActionsBilling.data;
+  if (githubGraphqlDiagnostics.ok) state.githubGraphqlDiagnostics = githubGraphqlDiagnostics.data;
   if (claudeAuto.ok) state.claudeCodeUsage = claudeAuto.data;
   if (claudeManual.ok) state.claudeDesktopCloudUsage = claudeManual.data;
   if (codexRateLimits.ok) state.codexRateLimits = codexRateLimits.data;
@@ -1446,6 +1520,7 @@ async function loadCompact() {
     dashboard,
     github,
     githubActionsBilling,
+    githubGraphqlDiagnostics,
     claudeAuto,
     claudeManual,
     codexRateLimits,
@@ -1514,6 +1589,7 @@ if (typeof module !== "undefined") {
     githubLimitedBannerHtml,
     githubSecondaryRateLimitBannerHtml,
     githubAutoRefreshNoticeHtml,
+    githubGraphqlDiagnosticsCompactCardHtml,
     githubSectionHtml,
     githubActionsBillingStatusClass,
     githubActionsBillingPlanLabel,

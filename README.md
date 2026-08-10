@@ -328,6 +328,12 @@ GitHub personal account（自分のアカウント）のGitHub Actions **月間*
 
 設計判断・公式ソースの詳細、および「なぜexact remainingを表示しないか」の根拠は[docs/github-actions-billing-monitor.md](docs/github-actions-billing-monitor.md)を参照してください。
 
+## GitHub GraphQL Consumption Diagnostics（v0.1、opt-in）
+
+GraphQL primary quotaの消費と、その時間帯にactiveだったactivity（Claude Code実行中、PR review中等）との**時間的相関（temporal correlation）**を確認できる診断機能です。GitHub APIはconsumer別のGraphQL使用量内訳を一切返さないため、「Xが消費した」という断定（exact attribution）は行いません。既定で無効（`GITHUB_GRAPHQL_DIAGNOSTICS_ENABLED=true`で有効化）。GitHub GraphQL APIは呼び出しません（`gh api rate_limit`のみ再利用）。
+
+詳細な意味論・API・既知の制約は[docs/github-graphql-consumption-diagnostics.md](docs/github-graphql-consumption-diagnostics.md)を参照してください。
+
 ## Remaining Work
 
 - OpenAI / Gemini / Claude の管理情報Collector実装。

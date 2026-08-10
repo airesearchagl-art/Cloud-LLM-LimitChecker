@@ -110,3 +110,59 @@ class CollectorImport(Base):
     source_type: Mapped[str] = mapped_column(String(40), nullable=False)
     usage_record_id: Mapped[int] = mapped_column(ForeignKey("usage_records.id"), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class GitHubDiagnosticSession(Base):
+    """A user-named "activity session" for GitHub GraphQL Consumption
+    Diagnostics v0.1 (see `app.github_graphql_diagnostics`'s module docstring
+    for the correlation-not-attribution design this table supports)."""
+
+    __tablename__ = "github_diagnostic_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    actor_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    repository: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    github_login: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    github_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reset_at_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    graphql_used_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_used_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_delta_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attribution_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="ACTIVE", index=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class GitHubRateSample(Base):
+    """A single point-in-time sample of the GitHub `graphql` rate-limit
+    resource, taken either on a scheduled sampler tick or immediately around
+    a session start/stop. Samples form one global timeline; which session(s)
+    (if any) were active at a given sample is always derived at query time
+    from `collected_at` vs. each session's `started_at`/`ended_at`, never
+    from a stored ownership link (see `trigger_session_id` below)."""
+
+    __tablename__ = "github_rate_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    core_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    search_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    graphql_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    graphql_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fetch_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    attribution_status: Mapped[str] = mapped_column(String(40), nullable=False)
+    # NOT an ownership/attribution link -- this only records which session's
+    # START or STOP action triggered an *immediate*, out-of-cycle sample (as
+    # opposed to a regular scheduled sampler tick, which always has
+    # trigger_session_id=None). It never means "this sample belongs to this
+    # session"; which session(s) were active during a sample is always
+    # derived separately, at query/report time, from this sample's
+    # collected_at compared against each session's started_at/ended_at.
+    trigger_session_id: Mapped[int | None] = mapped_column(ForeignKey("github_diagnostic_sessions.id"), nullable=True)

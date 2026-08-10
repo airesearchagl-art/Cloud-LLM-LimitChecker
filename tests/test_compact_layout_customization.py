@@ -63,7 +63,12 @@ def test_default_section_order_includes_all_known_sections():
 
 def test_default_card_order_matches_documented_stable_ids():
     meta = run_compact_js("compact.CARD_META_BY_SECTION")
-    assert [c["id"] for c in meta["section.github"]] == ["github.core", "github.graphql", "github.search"]
+    assert [c["id"] for c in meta["section.github"]] == [
+        "github.core",
+        "github.graphql",
+        "github.search",
+        "github.graphql-diagnostics",
+    ]
     assert [c["id"] for c in meta["section.github-actions"]] == ["github-actions.billing"]
     assert [c["id"] for c in meta["section.claude"]] == ["claude.five_hour", "claude.seven_day"]
     assert [c["id"] for c in meta["section.codex"]] == ["codex.five_hour", "codex.weekly"]
@@ -130,7 +135,12 @@ def test_sanitize_accepts_reordered_card_order_within_section():
         "hiddenCardIds": [],
     }
     state = run_compact_js(f"compact.sanitizeLayoutState({json.dumps(raw)})")
-    assert state["cardOrderBySection"]["section.github"] == ["github.search", "github.core", "github.graphql"]
+    assert state["cardOrderBySection"]["section.github"] == [
+        "github.search",
+        "github.core",
+        "github.graphql",
+        "github.graphql-diagnostics",
+    ]
     # 他セクションは既定順のまま(このセクションだけの変更が他へ波及しない)
     assert state["cardOrderBySection"]["section.claude"] == ["claude.five_hour", "claude.seven_day"]
 
@@ -150,7 +160,12 @@ def test_sanitize_rejects_cross_provider_card_id_in_wrong_section():
     state = run_compact_js(f"compact.sanitizeLayoutState({json.dumps(raw)})")
     # claude.five_hourはgithubセクションのdefaultOrderに存在しないため無視される
     assert "claude.five_hour" not in state["cardOrderBySection"]["section.github"]
-    assert state["cardOrderBySection"]["section.github"] == ["github.core", "github.graphql", "github.search"]
+    assert state["cardOrderBySection"]["section.github"] == [
+        "github.core",
+        "github.graphql",
+        "github.search",
+        "github.graphql-diagnostics",
+    ]
     # claudeセクション側にも紛れ込まない(そもそも保存対象外)
     assert state["cardOrderBySection"]["section.claude"] == ["claude.five_hour", "claude.seven_day"]
 
@@ -181,7 +196,7 @@ def test_serialize_and_load_round_trip_preserves_custom_layout():
             "section.dashboard",
         ],
         "cardOrderBySection": {
-            "section.github": ["github.graphql", "github.core", "github.search"],
+            "section.github": ["github.graphql", "github.core", "github.search", "github.graphql-diagnostics"],
             "section.github-actions": ["github-actions.billing"],
             "section.claude": ["claude.seven_day", "claude.five_hour"],
             "section.codex": ["codex.weekly", "codex.five_hour"],
@@ -297,7 +312,12 @@ def test_missing_ids_are_appended_at_end_in_default_order():
         "section.github-actions",
         "section.claude",
     ]
-    assert state["cardOrderBySection"]["section.github"] == ["github.search", "github.core", "github.graphql"]
+    assert state["cardOrderBySection"]["section.github"] == [
+        "github.search",
+        "github.core",
+        "github.graphql",
+        "github.graphql-diagnostics",
+    ]
 
 
 def test_non_array_section_order_falls_back_to_default_order():

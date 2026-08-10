@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -331,6 +331,86 @@ class CollectorRunRead(BaseModel):
     outcomes: list[CollectorImportOutcomeRead] | None = None
 
     model_config = {"from_attributes": True}
+
+
+def _normalize_naive_utc(value: object) -> object:
+    # SQLite (used in dev/tests; see `app.database.DATABASE_URL`'s default)
+    # has no native timezone-aware storage type -- even a column declared
+    # `DateTime(timezone=True)` silently round-trips a tz-aware value as
+    # naive on that backend. Every datetime these two models ever store is
+    # UTC (written exclusively by GitHubGraphQLDiagnosticsController, whose
+    # clock defaults to `timezone.utc`), so a naive value read back is
+    # unambiguous: re-attach UTC rather than let it serialize as an
+    # offset-less string, which downstream JS `Date` parsing would silently
+    # treat as browser-local time instead of UTC (mirrors
+    # app.github_graphql_diagnostics_controller._normalize_utc).
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+class GitHubDiagnosticSessionRead(BaseModel):
+    id: int
+    actor_type: str
+    label: str
+    repository: str | None
+    pr_number: int | None
+    started_at: datetime
+    ended_at: datetime | None
+    github_login: str | None
+    github_user_id: int | None
+    reset_at_start: datetime | None
+    graphql_used_start: int | None
+    graphql_used_end: int | None
+    graphql_delta_total: int | None
+    attribution_status: str
+    status: str
+    stop_reason: str | None
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("started_at", "ended_at", "reset_at_start", mode="before")
+    @classmethod
+    def normalize_naive_utc(cls, value: object) -> object:
+        return _normalize_naive_utc(value)
+
+
+class GitHubRateSampleRead(BaseModel):
+    id: int
+    collected_at: datetime
+    core_used: int | None
+    graphql_used: int | None
+    search_used: int | None
+    graphql_limit: int | None
+    graphql_remaining: int | None
+    graphql_reset_at: datetime | None
+    graphql_delta: int | None
+    fetch_status: str
+    attribution_status: str
+    trigger_session_id: int | None
+
+    model_config = {"from_attributes": True}
+
+    @field_validator("collected_at", "graphql_reset_at", mode="before")
+    @classmethod
+    def normalize_naive_utc(cls, value: object) -> object:
+        return _normalize_naive_utc(value)
+
+
+class GitHubGraphQLDiagnosticsStatus(BaseModel):
+    enabled: bool
+    sampler_running: bool
+    sample_seconds: int
+    max_minutes: int
+    active_sessions: list[GitHubDiagnosticSessionRead]
+    last_sample: GitHubRateSampleRead | None
+
+
+class GitHubGraphQLDiagnosticsStartRequest(BaseModel):
+    actor_type: str = Field(min_length=1, max_length=60)
+    label: str = Field(min_length=1, max_length=200)
+    repository: str | None = None
+    pr_number: int | None = None
 
 
 class CollectorPreflightStatusRead(BaseModel):
