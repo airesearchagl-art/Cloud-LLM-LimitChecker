@@ -333,6 +333,60 @@ class CollectorRunRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class GitHubDiagnosticSessionRead(BaseModel):
+    id: int
+    actor_type: str
+    label: str
+    repository: str | None
+    pr_number: int | None
+    started_at: datetime
+    ended_at: datetime | None
+    github_login: str | None
+    github_user_id: int | None
+    reset_at_start: datetime | None
+    graphql_used_start: int | None
+    graphql_used_end: int | None
+    graphql_delta_total: int | None
+    attribution_status: str
+    status: str
+    stop_reason: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class GitHubRateSampleRead(BaseModel):
+    id: int
+    collected_at: datetime
+    core_used: int | None
+    graphql_used: int | None
+    search_used: int | None
+    graphql_limit: int | None
+    graphql_remaining: int | None
+    graphql_reset_at: datetime | None
+    graphql_delta: int | None
+    fetch_status: str
+    attribution_status: str
+    trigger_session_id: int | None
+
+    model_config = {"from_attributes": True}
+
+
+class GitHubGraphQLDiagnosticsStatus(BaseModel):
+    enabled: bool
+    sampler_running: bool
+    sample_seconds: int
+    max_minutes: int
+    active_sessions: list[GitHubDiagnosticSessionRead]
+    last_sample: GitHubRateSampleRead | None
+
+
+class GitHubGraphQLDiagnosticsStartRequest(BaseModel):
+    actor_type: str = Field(min_length=1, max_length=60)
+    label: str = Field(min_length=1, max_length=200)
+    repository: str | None = None
+    pr_number: int | None = None
+
+
 class CollectorPreflightStatusRead(BaseModel):
     vendor: str
     configured: bool

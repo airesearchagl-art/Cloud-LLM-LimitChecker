@@ -7,6 +7,7 @@ const state = {
   codexUsage: null,
   codexRateLimits: null,
   claudeDesktopCloudUsage: null,
+  githubGraphqlDiagnostics: null,
 };
 
 const api = async (path, options = {}) => {
@@ -498,6 +499,193 @@ function renderGithubActionsBilling(data) {
   document.querySelector("#githubActionsBillingResult").innerHTML = githubActionsBillingHtml(data);
 }
 
+// ============================================================================
+// GitHub GraphQL Consumption Diagnostics(v0.1)
+//
+// 重要な非交渉事項: これは「時間的相関(temporal correlation)」の表示であり、
+// 「正確な消費元の特定(exact attribution)」ではない。GitHub APIはGraphQL
+// used差分がどのclient/process/tokenによるものかを一切公開しないため、
+// 「Xが消費しました」「confirmed」「exact」という表現、および2件以上の
+// Activityが重複している場合のper-session内訳(按分)は、このファイルの
+// どの関数からも出力しない(そのようなデータはサーバー側にも存在しない)。
+// ============================================================================
+
+const GITHUB_GRAPHQL_DIAGNOSTICS_ATTRIBUTION_LABELS = {
+  UNATTRIBUTED: "相関候補なし",
+  SINGLE_ACTIVITY_CORRELATION: "単一Activityと時間的相関",
+  OVERLAPPING_ACTIVITIES: "複数Activityが重複（個別内訳不可）",
+  RESET_BOUNDARY: "reset境界のため差分判定不可",
+  COUNTER_REGRESSION: "カウンタ減少を検出（差分判定不可）",
+  FETCH_FAILED: "取得失敗",
+};
+
+// DOMに触れない純粋関数: AttributionStatus(enum値)を、非attribution的な意味を
+// 保ったまま短い日本語ラベルへ変換する。未知の値は生のenum文字列をそのまま
+// 表示せず「不明」にfallbackする(未翻訳のenumがuser-facingラベルとして
+// 単独露出しないようにするため)。
+function githubGraphqlDiagnosticsAttributionLabel(status) {
+  return GITHUB_GRAPHQL_DIAGNOSTICS_ATTRIBUTION_LABELS[status] || "不明";
+}
+
+const GITHUB_GRAPHQL_DIAGNOSTICS_GENERIC_ERROR_MESSAGE =
+  "GraphQL消費診断の操作に失敗しました。しばらく待ってから再度お試しください。";
+
+const GITHUB_GRAPHQL_DIAGNOSTICS_KNOWN_ERROR_STATUSES = new Set([400, 404, 409, 502]);
+
+// DOMに触れない純粋関数: start/stopのレスポンスから画面へ表示してよい内容だけを
+// 決定する。githubActionsBillingErrorDisplayと同じ設計思想 -- statusが既知の
+// 4xx/5xxで、かつbody.detailが{error_type, user_message}という固定shapeの
+// 場合のみuser_messageを使う。それ以外(想定外のshape、bodyがnull、statusが
+// 未知)は常に固定genericメッセージへfallbackし、bodyの中身を一切echoしない。
+function githubGraphqlDiagnosticsErrorDisplay(status, body) {
+  const detail = body && typeof body === "object" ? body.detail : null;
+  const hasValidDetail =
+    detail &&
+    typeof detail === "object" &&
+    typeof detail.user_message === "string" &&
+    typeof detail.error_type === "string";
+
+  if (GITHUB_GRAPHQL_DIAGNOSTICS_KNOWN_ERROR_STATUSES.has(status) && hasValidDetail) {
+    return { error_type: detail.error_type, user_message: detail.user_message };
+  }
+  return { error_type: "unknown_error", user_message: GITHUB_GRAPHQL_DIAGNOSTICS_GENERIC_ERROR_MESSAGE };
+}
+
+function githubGraphqlDiagnosticsDisabledHtml() {
+  return `
+    <p class="muted">GraphQL消費診断は現在無効です。有効にするには環境変数 <code>GITHUB_GRAPHQL_DIAGNOSTICS_ENABLED=true</code> を設定してください。</p>`;
+}
+
+// DOMに触れない純粋関数: 計測開始フォームのHTML。実データに依存しない固定markup
+// なので、index.html側に手書きせずここで組み立てる(このファイルの他フォーム
+// (Claude Desktop Cloud / Codex手動入力)がJSではなくindex.htmlへ静的に書かれて
+// いるのは、フィールド自体が固定・単一のformだから。こちらはactive_sessions
+// (件数不定)を同じ結果領域内に併せて描画する必要があるため、フォームも
+// 動的生成側に揃える)。
+function githubGraphqlDiagnosticsStartFormHtml() {
+  return `
+    <form id="githubGraphqlDiagnosticsForm" class="codex-usage-form">
+      <label>
+        <span>Actor種別</span>
+        <select id="githubGraphqlDiagnosticsActorType" name="actor_type" required>
+          <option value="claude_code">Claude Code</option>
+          <option value="codex">Codex</option>
+          <option value="other">その他</option>
+        </select>
+      </label>
+      <label>
+        <span>ラベル</span>
+        <input id="githubGraphqlDiagnosticsLabel" name="label" type="text" placeholder="例: PR #25 review" required />
+      </label>
+      <label>
+        <span>Repository（任意）</span>
+        <input id="githubGraphqlDiagnosticsRepository" name="repository" type="text" placeholder="例: owner/repo" />
+      </label>
+      <label>
+        <span>PR番号（任意）</span>
+        <input id="githubGraphqlDiagnosticsPrNumber" name="pr_number" type="number" min="1" step="1" />
+      </label>
+      <button id="githubGraphqlDiagnosticsSubmit" type="submit">計測開始</button>
+      <div id="githubGraphqlDiagnosticsFormResult" class="codex-usage-result-slot" aria-live="polite"></div>
+    </form>`;
+}
+
+// DOMに触れない純粋関数: active_sessionsの1件ぶんのカードHTML。
+// lastSampleがある場合のみ「現在のGraphQL used」を出す。reset境界を跨いだ
+// (lastSample.graphql_reset_at !== session.reset_at_start)場合は、古い/無意味な
+// 数値を出さず、専用の判定不可メッセージにする(spec section 8)。
+function githubGraphqlDiagnosticsSessionCardHtml(session, lastSample) {
+  const actorType = escapeHtml(session.actor_type);
+  const label = escapeHtml(session.label);
+  const startedAt = escapeHtml(fmtDate(session.started_at));
+  const baselineUsed = fmtNumber(session.graphql_used_start);
+  const attributionLabel = escapeHtml(githubGraphqlDiagnosticsAttributionLabel(session.attribution_status));
+  const sessionId = escapeHtml(String(session.id));
+
+  let currentUsedText;
+  if (!lastSample) {
+    currentUsedText = "—";
+  } else if (lastSample.graphql_reset_at !== session.reset_at_start) {
+    currentUsedText = "reset境界を跨いだため判定不可";
+  } else {
+    currentUsedText = fmtNumber(lastSample.graphql_used);
+  }
+
+  const repositoryLine = session.repository
+    ? `<div class="github-graphql-diagnostics-meta">Repository: ${escapeHtml(session.repository)}${
+        session.pr_number ? ` #${escapeHtml(String(session.pr_number))}` : ""
+      }</div>`
+    : "";
+
+  return `
+    <div class="github-graphql-diagnostics-session" data-session-id="${sessionId}" data-attribution-status="${escapeHtml(
+    session.attribution_status || ""
+  )}">
+      <div class="github-graphql-diagnostics-session-head">
+        <span class="github-graphql-diagnostics-actor">${actorType}</span>
+        <span class="github-graphql-diagnostics-label">${label}</span>
+      </div>
+      ${repositoryLine}
+      <div class="github-graphql-diagnostics-meta">開始: ${startedAt}</div>
+      <div class="github-graphql-diagnostics-meta">開始時点のGraphQL used: ${escapeHtml(baselineUsed)}</div>
+      <div class="github-graphql-diagnostics-meta">現在のGraphQL used: ${escapeHtml(currentUsedText)}</div>
+      <div class="github-graphql-diagnostics-meta">相関状態: ${attributionLabel}</div>
+      <button type="button" class="github-graphql-diagnostics-stop" data-session-id="${sessionId}">終了</button>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: last_sampleの1行サマリ。deltaがnull(初回サンプルや
+// reset直後など「差分が原理的に無い」ケース)は0へ偽装せず必ず"—"にする。
+function githubGraphqlDiagnosticsLastSampleHtml(lastSample) {
+  if (!lastSample) {
+    return `<p class="muted">最終観測: 未取得</p>`;
+  }
+  const collectedAt = escapeHtml(fmtDate(lastSample.collected_at));
+  const graphqlUsed = escapeHtml(fmtNumber(lastSample.graphql_used));
+  const delta =
+    lastSample.graphql_delta === null || lastSample.graphql_delta === undefined
+      ? "—"
+      : escapeHtml(fmtNumber(lastSample.graphql_delta));
+  const attributionLabel = escapeHtml(githubGraphqlDiagnosticsAttributionLabel(lastSample.attribution_status));
+  return `<p class="muted">最終観測: ${collectedAt} ／ GraphQL used ${graphqlUsed} ／ 観測された差分 ${delta} ／ ${attributionLabel}</p>`;
+}
+
+// DOMに触れない純粋関数: GET /api/github-graphql-diagnostics のレスポンスから
+// パネル全体のHTMLを組み立てる。data.enabled === falseのときはstart formすら
+// 出さない(無効時に開始操作を誘発しないため)。
+function githubGraphqlDiagnosticsRenderPanel(data) {
+  if (!data) {
+    return `<p class="muted">状態: 未取得</p>`;
+  }
+  if (data.enabled === false) {
+    return githubGraphqlDiagnosticsDisabledHtml();
+  }
+
+  const lastSample = data.last_sample || null;
+  const sessions = Array.isArray(data.active_sessions) ? data.active_sessions : [];
+  const sessionsHtml = sessions.length
+    ? sessions.map((session) => githubGraphqlDiagnosticsSessionCardHtml(session, lastSample)).join("")
+    : `<p class="muted">計測中のActivityはありません。</p>`;
+
+  return `
+    ${githubGraphqlDiagnosticsStartFormHtml()}
+    <div id="githubGraphqlDiagnosticsSessions">
+      ${sessionsHtml}
+    </div>
+    ${githubGraphqlDiagnosticsLastSampleHtml(lastSample)}`;
+}
+
+function renderGithubGraphqlDiagnostics(data) {
+  document.querySelector("#githubGraphqlDiagnosticsResult").innerHTML = githubGraphqlDiagnosticsRenderPanel(data);
+}
+
+async function refreshGithubGraphqlDiagnostics() {
+  const data = await api("/api/github-graphql-diagnostics");
+  state.githubGraphqlDiagnostics = data;
+  renderGithubGraphqlDiagnostics(data);
+  return data;
+}
+
 function applyFiltersAndSort(rows) {
   const serviceText = document.querySelector("#filterService").value.trim().toLowerCase();
   const accountType = document.querySelector("#filterAccountType").value;
@@ -531,6 +719,7 @@ async function loadAll() {
     collectorRuns,
     githubRateLimit,
     githubActionsBilling,
+    githubGraphqlDiagnostics,
     claudeDesktopCloudUsage,
     codexUsage,
     codexRateLimits,
@@ -543,6 +732,12 @@ async function loadAll() {
     api("/api/collector-runs"),
     api("/api/github-rate-limit"),
     api("/api/github-actions-billing"),
+    // GET /api/github-graphql-diagnosticsは保存済みのcontroller/sampler状態を
+    // 返すだけの読み取り専用endpoint(GET /api/github-rate-limitと同じ性質)であり、
+    // GitHub Rate Limit/Actions Billingの「ボタンを押すまで取得しない」action系
+    // 更新とは違う -- ページ表示のたびに呼んでよい。start/stopは絶対にここから
+    // 呼ばない(明示的なボタン操作でのみ呼ぶ)。
+    api("/api/github-graphql-diagnostics"),
     api("/api/claude-code-usage/manual"),
     api("/api/codex-usage"),
     api("/api/codex-rate-limits"),
@@ -551,6 +746,7 @@ async function loadAll() {
   state.limits = limits;
   state.history = history;
   state.collectorRuns = collectorRuns;
+  state.githubGraphqlDiagnostics = githubGraphqlDiagnostics;
   renderSelects(services, limits);
   renderDashboard();
   renderAlerts(alerts);
@@ -558,6 +754,7 @@ async function loadAll() {
   renderCollectorRuns();
   renderGithubRateLimit(githubRateLimit);
   renderGithubActionsBilling(githubActionsBilling);
+  renderGithubGraphqlDiagnostics(githubGraphqlDiagnostics);
   renderClaudeDesktopCloudUsage(claudeDesktopCloudUsage);
   renderCodexUsage(codexUsage);
   renderCodexRateLimits(codexRateLimits);
@@ -1323,6 +1520,86 @@ function initApp() {
     }
   });
 
+  // #githubGraphqlDiagnosticsResultの中身は毎回丸ごとinnerHTMLで再生成される
+  // (フォーム自体・active_sessionsの各stopボタンとも)ため、個別にaddEventListener
+  // せずコンテナへのイベント委譲(delegation)で拾う。responseの本文は成功時の
+  // JSONを再取得(GET /api/github-graphql-diagnostics)して丸ごと再描画する用途以外
+  // には使わず、失敗時はgithubGraphqlDiagnosticsErrorDisplayを経由した固定文言
+  // 以外を一切表示しない(.text()は呼ばない)。
+  const githubGraphqlDiagnosticsContainer = document.querySelector("#githubGraphqlDiagnosticsResult");
+
+  githubGraphqlDiagnosticsContainer.addEventListener("submit", async (event) => {
+    const form = event.target.closest("#githubGraphqlDiagnosticsForm");
+    if (!form) return;
+    event.preventDefault();
+
+    const formData = new FormData(form);
+    const actorType = String(formData.get("actor_type") || "").trim();
+    const label = String(formData.get("label") || "").trim();
+    const repository = String(formData.get("repository") || "").trim();
+    const prNumberRaw = String(formData.get("pr_number") || "").trim();
+    const body = {
+      actor_type: actorType,
+      label: label,
+      repository: repository ? repository : null,
+      pr_number: prNumberRaw ? Number(prNumberRaw) : null,
+    };
+
+    const submitButton = form.querySelector("#githubGraphqlDiagnosticsSubmit");
+    const resultSlot = form.querySelector("#githubGraphqlDiagnosticsFormResult");
+    submitButton.disabled = true;
+    try {
+      const response = await fetch("/api/github-graphql-diagnostics/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        const resolved = githubGraphqlDiagnosticsErrorDisplay(response.status, errorBody);
+        resultSlot.innerHTML = `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`;
+        return;
+      }
+      await refreshGithubGraphqlDiagnostics();
+    } catch (error) {
+      const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
+      resultSlot.innerHTML = `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`;
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+
+  githubGraphqlDiagnosticsContainer.addEventListener("click", async (event) => {
+    const stopButton = event.target.closest(".github-graphql-diagnostics-stop");
+    if (!stopButton) return;
+
+    const sessionId = stopButton.dataset.sessionId;
+    stopButton.disabled = true;
+    try {
+      const response = await fetch(`/api/github-graphql-diagnostics/${encodeURIComponent(sessionId)}/stop`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        const resolved = githubGraphqlDiagnosticsErrorDisplay(response.status, errorBody);
+        githubGraphqlDiagnosticsContainer.insertAdjacentHTML(
+          "afterbegin",
+          `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`
+        );
+        return;
+      }
+      await refreshGithubGraphqlDiagnostics();
+    } catch (error) {
+      const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
+      githubGraphqlDiagnosticsContainer.insertAdjacentHTML(
+        "afterbegin",
+        `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`
+      );
+    } finally {
+      stopButton.disabled = false;
+    }
+  });
+
   document.querySelector("#codexRateLimitsRefresh").addEventListener("click", async () => {
     stopCodexRateLimitsCooldownCountdown();
     const button = document.querySelector("#codexRateLimitsRefresh");
@@ -1430,6 +1707,13 @@ if (typeof module !== "undefined") {
     githubActionsBillingHtml,
     githubActionsBillingCardHtml,
     githubActionsBillingErrorDisplay,
+    githubGraphqlDiagnosticsAttributionLabel,
+    githubGraphqlDiagnosticsErrorDisplay,
+    githubGraphqlDiagnosticsDisabledHtml,
+    githubGraphqlDiagnosticsStartFormHtml,
+    githubGraphqlDiagnosticsSessionCardHtml,
+    githubGraphqlDiagnosticsLastSampleHtml,
+    githubGraphqlDiagnosticsRenderPanel,
     codexRateLimitsErrorDisplay,
     confirmClaudeDesktopCloudUsageSave,
     parseDatetimeLocalToIsoOrNull,

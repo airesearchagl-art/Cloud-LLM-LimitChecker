@@ -1,10 +1,15 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.time_utils import app_tz, now_local
+
+# Upper bound applied to any `limit` parameter accepted by the list_* helpers
+# below (github diagnostic sessions / rate samples), so a caller can never
+# request an unbounded query regardless of what a route/UI passes through.
+SAFE_MAX_LIMIT = 500
 
 
 class LimitNotFoundError(Exception):
@@ -215,4 +220,151 @@ def list_collector_runs(db: Session, vendor: str | None = None) -> list[models.C
     stmt = select(models.CollectorRun).order_by(models.CollectorRun.started_at.desc(), models.CollectorRun.id.desc())
     if vendor:
         stmt = stmt.where(models.CollectorRun.vendor == vendor.strip().lower())
+    return list(db.scalars(stmt).all())
+
+
+def _clamp_limit(limit: int) -> int:
+    """Clamp a caller-supplied `limit` into `[1, SAFE_MAX_LIMIT]` so the
+    list_* helpers below can never be used to run an unbounded query."""
+    return max(1, min(limit, SAFE_MAX_LIMIT))
+
+
+def create_diagnostic_session(
+    db: Session,
+    *,
+    actor_type: str,
+    label: str,
+    repository: str | None,
+    pr_number: int | None,
+    started_at: datetime,
+    github_login: str | None,
+    github_user_id: int | None,
+    reset_at_start: datetime | None,
+    graphql_used_start: int | None,
+    attribution_status: str,
+    status: str = "ACTIVE",
+) -> models.GitHubDiagnosticSession:
+    session = models.GitHubDiagnosticSession(
+        actor_type=actor_type,
+        label=label,
+        repository=repository,
+        pr_number=pr_number,
+        started_at=started_at,
+        github_login=github_login,
+        github_user_id=github_user_id,
+        reset_at_start=reset_at_start,
+        graphql_used_start=graphql_used_start,
+        attribution_status=attribution_status,
+        status=status,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_diagnostic_session(db: Session, session_id: int) -> models.GitHubDiagnosticSession | None:
+    return db.get(models.GitHubDiagnosticSession, session_id)
+
+
+def list_active_diagnostic_sessions(db: Session) -> list[models.GitHubDiagnosticSession]:
+    stmt = select(models.GitHubDiagnosticSession).where(models.GitHubDiagnosticSession.status == "ACTIVE")
+    return list(db.scalars(stmt).all())
+
+
+def count_active_diagnostic_sessions(db: Session) -> int:
+    count = db.scalar(
+        select(func.count(models.GitHubDiagnosticSession.id)).where(
+            models.GitHubDiagnosticSession.status == "ACTIVE"
+        )
+    )
+    return int(count or 0)
+
+
+def list_diagnostic_sessions(db: Session, *, limit: int, offset: int = 0) -> list[models.GitHubDiagnosticSession]:
+    # `limit` is clamped to [1, SAFE_MAX_LIMIT] -- never allow an unbounded query.
+    stmt = (
+        select(models.GitHubDiagnosticSession)
+        .order_by(models.GitHubDiagnosticSession.started_at.desc(), models.GitHubDiagnosticSession.id.desc())
+        .limit(_clamp_limit(limit))
+        .offset(offset)
+    )
+    return list(db.scalars(stmt).all())
+
+
+def update_diagnostic_session(
+    db: Session,
+    session: models.GitHubDiagnosticSession,
+    **fields,
+) -> models.GitHubDiagnosticSession:
+    for key, value in fields.items():
+        setattr(session, key, value)
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def create_rate_sample(
+    db: Session,
+    *,
+    collected_at: datetime,
+    core_used: int | None,
+    graphql_used: int | None,
+    search_used: int | None,
+    graphql_limit: int | None,
+    graphql_remaining: int | None,
+    graphql_reset_at: datetime | None,
+    graphql_delta: int | None,
+    fetch_status: str,
+    attribution_status: str,
+    trigger_session_id: int | None = None,
+) -> models.GitHubRateSample:
+    sample = models.GitHubRateSample(
+        collected_at=collected_at,
+        core_used=core_used,
+        graphql_used=graphql_used,
+        search_used=search_used,
+        graphql_limit=graphql_limit,
+        graphql_remaining=graphql_remaining,
+        graphql_reset_at=graphql_reset_at,
+        graphql_delta=graphql_delta,
+        fetch_status=fetch_status,
+        attribution_status=attribution_status,
+        trigger_session_id=trigger_session_id,
+    )
+    db.add(sample)
+    db.commit()
+    db.refresh(sample)
+    return sample
+
+
+def list_rate_samples(db: Session, *, limit: int, offset: int = 0) -> list[models.GitHubRateSample]:
+    # `limit` is clamped to [1, SAFE_MAX_LIMIT] -- never allow an unbounded query.
+    stmt = (
+        select(models.GitHubRateSample)
+        .order_by(models.GitHubRateSample.collected_at.desc(), models.GitHubRateSample.id.desc())
+        .limit(_clamp_limit(limit))
+        .offset(offset)
+    )
+    return list(db.scalars(stmt).all())
+
+
+def get_latest_rate_sample(db: Session) -> models.GitHubRateSample | None:
+    stmt = select(models.GitHubRateSample).order_by(
+        models.GitHubRateSample.collected_at.desc(), models.GitHubRateSample.id.desc()
+    )
+    return db.scalars(stmt).first()
+
+
+def list_rate_samples_between(db: Session, *, start: datetime, end: datetime) -> list[models.GitHubRateSample]:
+    """Samples with `collected_at` in `[start, end]`, ascending order. Used to
+    compute a session's "largest valid sample delta" at query/report time --
+    filtering to `fetch_status == "ok"` is the caller's responsibility, not
+    this function's."""
+    stmt = (
+        select(models.GitHubRateSample)
+        .where(models.GitHubRateSample.collected_at >= start, models.GitHubRateSample.collected_at <= end)
+        .order_by(models.GitHubRateSample.collected_at.asc(), models.GitHubRateSample.id.asc())
+    )
     return list(db.scalars(stmt).all())

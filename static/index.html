@@ -124,6 +124,18 @@
       </section>
 
       <section>
+        <div class="panel" id="githubGraphqlDiagnosticsPanel">
+          <div class="panel-heading">
+            <h2>GraphQL消費診断</h2>
+          </div>
+          <p class="form-note">
+            GitHub APIはGraphQL使用量の消費元(consumer)別内訳を提供しません。ここで示すのは「Activity中にGraphQL used +Nを観測」という時間的相関(temporal correlation)であり、正確な消費元の特定(exact attribution)ではありません。
+          </p>
+          <div id="githubGraphqlDiagnosticsResult"></div>
+        </div>
+      </section>
+
+      <section>
         <div class="panel" id="claudeDesktopCloudUsagePanel">
           <div class="panel-heading">
             <h2>Claude Desktop Cloud 使用率（手動入力）</h2>

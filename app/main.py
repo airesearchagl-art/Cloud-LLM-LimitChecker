@@ -62,6 +62,17 @@ from app.github_actions_billing_state import (
     GitHubActionsBillingRefreshCooldownError,
     GitHubActionsBillingRefreshInProgressError,
 )
+from app.github_graphql_diagnostics_controller import (
+    GitHubGraphQLDiagnosticsAccountContextChangedError,
+    GitHubGraphQLDiagnosticsController,
+    GitHubGraphQLDiagnosticsDisabledError,
+    GitHubGraphQLDiagnosticsIdentityFetchError,
+    GitHubGraphQLDiagnosticsSessionNotFoundError,
+)
+from app.github_graphql_diagnostics_export import (
+    export_github_graphql_samples_csv,
+    export_github_graphql_sessions_csv,
+)
 from app.github_rate_limit_cli import fetch_github_rate_limit
 from app.github_rate_limit_state import (
     GitHubRateLimitController,
@@ -151,11 +162,19 @@ async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
     # no-op when no task was actually created. Exactly one `yield` below;
     # this function must never yield a second time.
     scheduler = app_instance.state.codex_rate_limits_scheduler
+    # GraphQL Diagnostics (v0.1): any session left ACTIVE by a prior process
+    # that didn't shut down cleanly is reconciled to ABORTED here — see
+    # GitHubGraphQLDiagnosticsController.reconcile_on_startup's docstring.
+    # This never starts the diagnostics sampler itself (it only starts in
+    # response to a new POST .../start call after a restart).
+    diagnostics_controller = app_instance.state.github_graphql_diagnostics_controller
     try:
         scheduler.start()
+        await diagnostics_controller.reconcile_on_startup()
         yield
     finally:
         await scheduler.stop()
+        await diagnostics_controller.shutdown()
 
 
 app = FastAPI(title="Cloud LLM Limit Checker", version="0.1.0", lifespan=lifespan)
@@ -171,6 +190,15 @@ app.state.github_rate_limit_controller = GitHubRateLimitController()
 # minutes entitlement, not hourly API request quota). Page load never
 # triggers a fetch here either — only the POST refresh endpoint calls `gh`.
 app.state.github_actions_billing_controller = GitHubActionsBillingController()
+
+# Process-local only (see GitHubGraphQLDiagnosticsController docstring):
+# opt-in (GITHUB_GRAPHQL_DIAGNOSTICS_ENABLED, default false) diagnostic
+# sampling of the same `gh api rate_limit` REST endpoint the two controllers
+# above already use — never GitHub's GraphQL API itself. The periodic
+# sampler only runs while at least one diagnostic session is ACTIVE; page
+# load never starts it (GET /api/github-graphql-diagnostics is a pure
+# DB-state read).
+app.state.github_graphql_diagnostics_controller = GitHubGraphQLDiagnosticsController()
 
 # Process-local only (see CodexRateLimitsController docstring): the actual
 # rate limit data lives in the file-based cache, not here. Page load never
@@ -620,6 +648,125 @@ def refresh_github_actions_billing() -> dict:
             },
         ) from exc
     return snapshot
+
+
+# ---------------------------------------------------------------------------
+# GitHub GraphQL Consumption Diagnostics (v0.1)
+#
+# Temporal correlation only, never exact per-consumer attribution — see
+# app/github_graphql_diagnostics.py's module docstring and
+# docs/github-graphql-consumption-diagnostics.md. This app never calls
+# GitHub's GraphQL API for this feature; only `gh api rate_limit` (already
+# used by /api/github-rate-limit above) and, once per session start,
+# `gh api user` (login/numeric id only — see
+# app/github_graphql_diagnostics_identity.py).
+# ---------------------------------------------------------------------------
+
+
+def _github_graphql_diagnostics_controller() -> GitHubGraphQLDiagnosticsController:
+    return app.state.github_graphql_diagnostics_controller
+
+
+@app.get("/api/github-graphql-diagnostics", response_model=schemas.GitHubGraphQLDiagnosticsStatus)
+def get_github_graphql_diagnostics() -> dict:
+    """Pure DB-state read (like /api/github-rate-limit) — never triggers a
+    fetch or touches the sampler. Safe to call on every page load."""
+    return _github_graphql_diagnostics_controller().status_snapshot()
+
+
+@app.post("/api/github-graphql-diagnostics/start")
+async def start_github_graphql_diagnostics(body: schemas.GitHubGraphQLDiagnosticsStartRequest) -> dict:
+    controller = _github_graphql_diagnostics_controller()
+    try:
+        result = await controller.start_session(
+            actor_type=body.actor_type,
+            label=body.label,
+            repository=body.repository,
+            pr_number=body.pr_number,
+        )
+    except GitHubGraphQLDiagnosticsDisabledError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error_type": "diagnostics_disabled",
+                "user_message": "GraphQL消費診断は現在無効です。GITHUB_GRAPHQL_DIAGNOSTICS_ENABLEDを確認してください。",
+            },
+        ) from exc
+    except GitHubGraphQLDiagnosticsIdentityFetchError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error_type": exc.result.error_type, "user_message": exc.result.user_message},
+        ) from exc
+    except GitHubGraphQLDiagnosticsAccountContextChangedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "account_context_changed",
+                "user_message": "現在activeな診断Sessionと異なるGitHubアカウントが検出されました。既存Sessionを終了してから開始してください。",
+            },
+        ) from exc
+    return {"session": result["session"], "baseline_sample": result["sample"]}
+
+
+@app.post("/api/github-graphql-diagnostics/{session_id}/stop")
+async def stop_github_graphql_diagnostics(session_id: int) -> dict:
+    controller = _github_graphql_diagnostics_controller()
+    try:
+        result = await controller.stop_session(session_id=session_id)
+    except GitHubGraphQLDiagnosticsSessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_type": "session_not_found", "user_message": "指定されたSessionが見つかりません。"},
+        ) from exc
+    return {"session": result["session"], "final_sample": result["sample"]}
+
+
+@app.get("/api/github-graphql-diagnostics/samples")
+def list_github_graphql_diagnostics_samples(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db)
+) -> dict:
+    """`limit` is clamped server-side to `[1, crud.SAFE_MAX_LIMIT]` inside
+    `crud.list_rate_samples` — never an unbounded query."""
+    rows = crud.list_rate_samples(db, limit=limit, offset=offset)
+    return {
+        "items": [schemas.GitHubRateSampleRead.model_validate(row).model_dump(mode="json") for row in rows],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/github-graphql-diagnostics/sessions")
+def list_github_graphql_diagnostics_sessions(
+    limit: int = 100, offset: int = 0, db: Session = Depends(get_db)
+) -> dict:
+    rows = crud.list_diagnostic_sessions(db, limit=limit, offset=offset)
+    return {
+        "items": [schemas.GitHubDiagnosticSessionRead.model_validate(row).model_dump(mode="json") for row in rows],
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/api/export/github-graphql-samples.csv")
+def export_github_graphql_samples_as_csv(db: Session = Depends(get_db)) -> Response:
+    rows = crud.list_rate_samples(db, limit=crud.SAFE_MAX_LIMIT, offset=0)
+    dict_rows = [schemas.GitHubRateSampleRead.model_validate(row).model_dump(mode="json") for row in rows]
+    return Response(
+        content=export_github_graphql_samples_csv(dict_rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="github-graphql-samples.csv"'},
+    )
+
+
+@app.get("/api/export/github-graphql-sessions.csv")
+def export_github_graphql_sessions_as_csv(db: Session = Depends(get_db)) -> Response:
+    rows = crud.list_diagnostic_sessions(db, limit=crud.SAFE_MAX_LIMIT, offset=0)
+    dict_rows = [schemas.GitHubDiagnosticSessionRead.model_validate(row).model_dump(mode="json") for row in rows]
+    return Response(
+        content=export_github_graphql_sessions_csv(dict_rows),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="github-graphql-sessions.csv"'},
+    )
 
 
 @app.get("/api/claude-code-usage", response_model=schemas.ClaudeCodeUsageSnapshot)
