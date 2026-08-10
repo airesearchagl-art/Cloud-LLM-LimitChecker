@@ -46,8 +46,10 @@ Copy-Item .env.example .env
 ## Run
 
 ```powershell
-uvicorn app.main:app --reload
+uvicorn app.main:app --env-file .env --reload
 ```
+
+`.env` がなくても最小構成（vendor collectorの認証情報なしでのdashboard利用など）で起動できます。
 
 ```text
 http://127.0.0.1:8000
@@ -60,7 +62,7 @@ http://127.0.0.1:8000
 ```text
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe -m pytest
-.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001
+.venv\Scripts\python.exe -m uvicorn app.main:app --env-file .env --reload --port 8001
 ```
 
 `.venv` はGit管理対象外です（`.gitignore`で除外済み）。依存パッケージのバージョン更新は、この手順の一部としてではなく、`requirements.txt`の変更内容とpytest実行結果を明示的に確認する別PRで行ってください。
@@ -80,7 +82,7 @@ http://127.0.0.1:8000
 
 ### 開発時
 
-コード変更を即座に反映したい開発時は、`start_dashboard.bat`ではなく、上記「Windows Standard Commands」の `--reload` 付きコマンド（`.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001`）を使用してください。`start_dashboard.bat`は日常利用向けのため`--reload`を付けていません。
+コード変更を即座に反映したい開発時は、`start_dashboard.bat`ではなく、上記「Windows Standard Commands」の `--reload` 付きコマンド（`.venv\Scripts\python.exe -m uvicorn app.main:app --env-file .env --reload --port 8001`）を使用してください。`start_dashboard.bat`は日常利用向けのため`--reload`を付けていません。
 
 ### Windows再起動後
 

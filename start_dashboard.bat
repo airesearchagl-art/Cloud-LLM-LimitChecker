@@ -27,6 +27,11 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+set "ENV_FILE_ARG="
+if exist ".env" (
+    set "ENV_FILE_ARG=--env-file .env"
+)
+
 if not exist ".env" (
     echo [WARNING] .env が見つかりません。
     echo 必要に応じて .env.example から作成してください。
@@ -40,7 +45,7 @@ echo.
 
 start "" powershell -NoProfile -WindowStyle Hidden -Command "$deadline = (Get-Date).AddSeconds(20); while ((Get-Date) -lt $deadline) { try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8001/api/health' -TimeoutSec 2; if ($r.StatusCode -eq 200) { break } } catch {}; Start-Sleep -Milliseconds 500 }; Start-Process 'http://127.0.0.1:8001'"
 
-".venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8001
+".venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8001 %ENV_FILE_ARG%
 
 echo.
 echo Server stopped.
