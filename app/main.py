@@ -740,15 +740,32 @@ def list_github_graphql_diagnostics_samples(
 
 def _max_valid_interval_delta(db: Session, session: models.GitHubDiagnosticSession) -> int | None:
     """The largest single-interval OBSERVED delta (fetch_status="ok" only)
-    among samples falling within this session's [started_at, ended_at-or-now]
-    window -- a "worst single observed interval" indicator, distinct from
-    the session's own start-to-end total (`graphql_delta_total`). `None` if
-    no valid-delta sample falls within the window (e.g. every sample in
-    range hit a reset boundary/counter regression/fetch failure, or none
-    were taken). Never fabricates a value for an empty/invalid set."""
+    among samples taken strictly AFTER this session started, up to
+    ended_at-or-now -- a "worst single observed interval" indicator,
+    distinct from the session's own start-to-end total
+    (`graphql_delta_total`). `None` if no valid-delta sample falls within
+    the window (e.g. every sample in range hit a reset boundary/counter
+    regression/fetch failure, or none were taken). Never fabricates a value
+    for an empty/invalid set.
+
+    The session's own baseline sample (collected_at == started_at) is
+    deliberately excluded here via a strict `>` comparison: that sample's
+    delta describes the interval BEFORE this session existed (the same
+    baseline-exclusion rationale as `_start_session_sync`'s
+    `active_session_count=len(active)` -- see Finding 2), so including it
+    would let a large pre-session usage gap masquerade as "the worst
+    interval observed during this session". `crud.list_rate_samples_between`
+    itself keeps its general-purpose inclusive-at-start `[start, end]`
+    contract unchanged; the exclusion is applied only here, for this one
+    derived metric.
+    """
     end = session.ended_at or _current_utc_time()
     samples = crud.list_rate_samples_between(db, start=session.started_at, end=end)
-    valid_deltas = [s.graphql_delta for s in samples if s.fetch_status == "ok" and s.graphql_delta is not None]
+    valid_deltas = [
+        s.graphql_delta
+        for s in samples
+        if s.collected_at > session.started_at and s.fetch_status == "ok" and s.graphql_delta is not None
+    ]
     return max(valid_deltas) if valid_deltas else None
 
 
