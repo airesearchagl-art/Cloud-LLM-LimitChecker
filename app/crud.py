@@ -223,7 +223,7 @@ def list_collector_runs(db: Session, vendor: str | None = None) -> list[models.C
     return list(db.scalars(stmt).all())
 
 
-def _clamp_limit(limit: int) -> int:
+def clamp_limit(limit: int) -> int:
     """Clamp a caller-supplied `limit` into `[1, SAFE_MAX_LIMIT]` so the
     list_* helpers below can never be used to run an unbounded query."""
     return max(1, min(limit, SAFE_MAX_LIMIT))
@@ -286,7 +286,7 @@ def list_diagnostic_sessions(db: Session, *, limit: int, offset: int = 0) -> lis
     stmt = (
         select(models.GitHubDiagnosticSession)
         .order_by(models.GitHubDiagnosticSession.started_at.desc(), models.GitHubDiagnosticSession.id.desc())
-        .limit(_clamp_limit(limit))
+        .limit(clamp_limit(limit))
         .offset(offset)
     )
     return list(db.scalars(stmt).all())
@@ -344,7 +344,7 @@ def list_rate_samples(db: Session, *, limit: int, offset: int = 0) -> list[model
     stmt = (
         select(models.GitHubRateSample)
         .order_by(models.GitHubRateSample.collected_at.desc(), models.GitHubRateSample.id.desc())
-        .limit(_clamp_limit(limit))
+        .limit(clamp_limit(limit))
         .offset(offset)
     )
     return list(db.scalars(stmt).all())

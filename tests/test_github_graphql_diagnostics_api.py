@@ -303,6 +303,30 @@ def test_samples_and_sessions_list_endpoints_paginate(diagnostics_client):
     assert len(samples_body["items"]) >= 6  # baseline + final sample per session, at least
 
 
+def test_pagination_reflects_actual_clamped_values(diagnostics_client):
+    response = diagnostics_client.get("/api/github-graphql-diagnostics/sessions?limit=99999&offset=-5")
+    body = response.json()
+    assert response.status_code == 200
+    assert body["limit"] == 500  # crud.SAFE_MAX_LIMIT, not the raw 99999 requested
+    assert body["offset"] == 0  # negative offset floored to 0, not echoed raw
+
+
+def test_sessions_list_includes_max_valid_interval_delta(diagnostics_client):
+    started = diagnostics_client.post(
+        "/api/github-graphql-diagnostics/start",
+        json={"actor_type": "claude_code", "label": "test"},
+    ).json()
+    diagnostics_client.post(f"/api/github-graphql-diagnostics/{started['session']['id']}/stop")
+
+    sessions_body = diagnostics_client.get("/api/github-graphql-diagnostics/sessions?limit=10").json()
+    matching = [s for s in sessions_body["items"] if s["id"] == started["session"]["id"]]
+    assert len(matching) == 1
+    # Same fetch payload for baseline and final sample (fake_fetch is
+    # static) -> delta 0 for the only interval inside this session's
+    # window, still a valid ("ok") observed delta, not None.
+    assert matching[0]["max_valid_interval_delta"] == 0
+
+
 def test_samples_csv_export_has_safe_header_and_no_secret(diagnostics_client):
     diagnostics_client.post(
         "/api/github-graphql-diagnostics/start",
@@ -374,3 +398,43 @@ def test_never_calls_graphql_endpoint_across_full_lifecycle(diagnostics_client):
         json={"actor_type": "claude_code", "label": "test"},
     ).json()
     diagnostics_client.post(f"/api/github-graphql-diagnostics/{started['session']['id']}/stop")
+
+
+def test_sessions_and_samples_list_return_timezone_aware_timestamps(diagnostics_client):
+    """Regression guard for a real bug found during this round's manual UI
+    check: SQLite round-trips a tz-aware datetime as naive even on a column
+    declared `DateTime(timezone=True)`. The status snapshot endpoint
+    (`GET /api/github-graphql-diagnostics`) already re-attaches UTC via
+    `_normalize_utc` before building its response dict, but the `/sessions`
+    and `/samples` list routes serialize straight off the ORM row via
+    `GitHubDiagnosticSessionRead`/`GitHubRateSampleRead` -- without a fix,
+    those two routes would echo back an offset-less ISO string (e.g.
+    `"2026-08-10T07:47:21.428467"`), which downstream JS `Date` parsing
+    treats as browser-local time instead of UTC, corrupting every
+    start/end/collected_at shown in the new Recent Activity Sessions /
+    Sample Timeline UI for any non-UTC browser timezone.
+    """
+    started = diagnostics_client.post(
+        "/api/github-graphql-diagnostics/start",
+        json={"actor_type": "claude_code", "label": "tz-check"},
+    ).json()
+    session_id = started["session"]["id"]
+    diagnostics_client.post(f"/api/github-graphql-diagnostics/{session_id}/stop")
+
+    sessions_body = diagnostics_client.get("/api/github-graphql-diagnostics/sessions?limit=10").json()
+    matching = [s for s in sessions_body["items"] if s["id"] == session_id]
+    assert len(matching) == 1
+    session = matching[0]
+    for field in ("started_at", "ended_at", "reset_at_start"):
+        value = session[field]
+        assert value is not None
+        assert value.endswith("Z") or "+" in value[10:], f"{field} is not timezone-aware: {value!r}"
+
+    samples_body = diagnostics_client.get("/api/github-graphql-diagnostics/samples?limit=10").json()
+    assert samples_body["items"]
+    for sample in samples_body["items"]:
+        collected_at = sample["collected_at"]
+        assert collected_at.endswith("Z") or "+" in collected_at[10:], f"collected_at not timezone-aware: {collected_at!r}"
+        if sample["graphql_reset_at"] is not None:
+            reset_at = sample["graphql_reset_at"]
+            assert reset_at.endswith("Z") or "+" in reset_at[10:], f"graphql_reset_at not timezone-aware: {reset_at!r}"

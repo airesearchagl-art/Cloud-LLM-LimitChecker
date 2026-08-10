@@ -726,24 +726,51 @@ def list_github_graphql_diagnostics_samples(
     limit: int = 100, offset: int = 0, db: Session = Depends(get_db)
 ) -> dict:
     """`limit` is clamped server-side to `[1, crud.SAFE_MAX_LIMIT]` inside
-    `crud.list_rate_samples` — never an unbounded query."""
-    rows = crud.list_rate_samples(db, limit=limit, offset=offset)
+    `crud.list_rate_samples` — never an unbounded query. The response's
+    `"limit"`/`"offset"` reflect the ACTUAL values applied (clamped/floored),
+    not the raw request values, so a caller can tell what was really used."""
+    effective_offset = max(0, offset)
+    rows = crud.list_rate_samples(db, limit=limit, offset=effective_offset)
     return {
         "items": [schemas.GitHubRateSampleRead.model_validate(row).model_dump(mode="json") for row in rows],
-        "limit": limit,
-        "offset": offset,
+        "limit": crud.clamp_limit(limit),
+        "offset": effective_offset,
     }
+
+
+def _max_valid_interval_delta(db: Session, session: models.GitHubDiagnosticSession) -> int | None:
+    """The largest single-interval OBSERVED delta (fetch_status="ok" only)
+    among samples falling within this session's [started_at, ended_at-or-now]
+    window -- a "worst single observed interval" indicator, distinct from
+    the session's own start-to-end total (`graphql_delta_total`). `None` if
+    no valid-delta sample falls within the window (e.g. every sample in
+    range hit a reset boundary/counter regression/fetch failure, or none
+    were taken). Never fabricates a value for an empty/invalid set."""
+    end = session.ended_at or _current_utc_time()
+    samples = crud.list_rate_samples_between(db, start=session.started_at, end=end)
+    valid_deltas = [s.graphql_delta for s in samples if s.fetch_status == "ok" and s.graphql_delta is not None]
+    return max(valid_deltas) if valid_deltas else None
 
 
 @app.get("/api/github-graphql-diagnostics/sessions")
 def list_github_graphql_diagnostics_sessions(
     limit: int = 100, offset: int = 0, db: Session = Depends(get_db)
 ) -> dict:
-    rows = crud.list_diagnostic_sessions(db, limit=limit, offset=offset)
+    """See `list_github_graphql_diagnostics_samples` — same clamp-and-report-
+    actual-values policy. Each item also carries `max_valid_interval_delta`
+    (see `_max_valid_interval_delta`), computed per-session — acceptable
+    for this feature's scale (`limit` is capped at `crud.SAFE_MAX_LIMIT`)."""
+    effective_offset = max(0, offset)
+    rows = crud.list_diagnostic_sessions(db, limit=limit, offset=effective_offset)
+    items = []
+    for row in rows:
+        item = schemas.GitHubDiagnosticSessionRead.model_validate(row).model_dump(mode="json")
+        item["max_valid_interval_delta"] = _max_valid_interval_delta(db, row)
+        items.append(item)
     return {
-        "items": [schemas.GitHubDiagnosticSessionRead.model_validate(row).model_dump(mode="json") for row in rows],
-        "limit": limit,
-        "offset": offset,
+        "items": items,
+        "limit": crud.clamp_limit(limit),
+        "offset": effective_offset,
     }
 
 

@@ -70,8 +70,10 @@ samplesは**1本のglobal timeline**であり、`trigger_session_id`は「どの
 
 ## 8. 既知のv0.1の制約
 
-- **自動遷移でactive setが空になってもsamplerは自分自身を停止しない**: scheduled tickの中で`AUTO_STOPPED`/`EXHAUSTED`遷移が発生してactive sessionが0件になっても、そのtick自身の中からsamplerを停止しない（自分が実行中のcoroutineを自己参照的にcancel/awaitするデッドロックリスクを避けるため）。その後のtickは単に`UNATTRIBUTED`のglobal sampleを記録し続け、無害だが無駄ではある。明示的な`stop_session`呼び出し（active数を0にする）またはプロセス再起動でのみ実際にsamplerが止まる。
-- **Sessionの`attribution_status`列はbaseline sample時点で1回だけ設定され、以後更新されない**: session全体の履歴を通じた正確なattributionは常に個々の`GitHubRateSample`行を参照する必要がある。
+- **samplerはactive session数が0になった時点で確実に停止する**: `on_tick() -> bool`契約（`False`=停止）により、scheduled tickの中で`AUTO_STOPPED`/`EXHAUSTED`遷移が発生してactive sessionが0件になった場合、明示的`stop_session`呼び出しでactive数が0になった場合、tick開始時点で既にactive数が0だった場合（race）のいずれでも、そのtickの`_scheduled_tick`が`False`を返し、sampler自身の`_run()`ループが自然にreturnして終了する（自己が実行中のcoroutineを自己参照的にcancel/awaitすることはない）。無駄な`UNATTRIBUTED`サンプルを記録し続けることはない。
+- **process-wide operation lock**: `start_session`/`stop_session`/scheduled tickは`asyncio.Lock`で全体をserializeしており、`gh api rate_limit`/`gh api user`の同時多重呼び出しは発生しない（同時start×2でも`max concurrent fetch == 1`）。
+- **fetch失敗時はfail-closed**: いかなるfetch失敗でも直前のsample状態を破棄する（`_last_sample_resource = None`）。次に成功したfetchは常に新しいbaselineとして扱われ、未計測のgapを跨いだ誤ったprecise deltaを計算しない。
+- **Sessionの`attribution_status`列はbaseline sample時点で1回だけ設定され、以後更新されない**: session全体の履歴を通じた正確なattributionは常に個々の`GitHubRateSample`行を参照する必要がある。Main dashboardのSession cardの「相関状態」表示は、この列を直接出さず、条件（同一reset window内かつsession開始後）を満たす最新sampleのattributionを表示する。条件を満たすsampleが無ければ「まだ観測なし」と表示する。「Recent Activity Sessions」比較テーブルでは`attribution_status`列自体を一切表示せず、Sample Timelineが相関状態の権威あるsourceであることを注記する。
 - `graphql_delta_total`は「observed delta」であり、正確な「消費量」ではない（前提となる`used`値そのものがconsumer別内訳を持たないため）。
 
 ## 9. DB永続化
@@ -98,4 +100,11 @@ samplesは**1本のglobal timeline**であり、`trigger_session_id`は「どの
 
 ## 12. UI
 
-Main dashboardに`GraphQL消費診断`パネルを追加（既存の`GitHub API Rate Limit`/`GitHub Actions`パネルと同じ配置規約）。開始フォーム・ACTIVE sessionカード・最終観測sample行を表示。Compact dashboardには既存`section.github`カード群へ「有効/無効」「計測中N件」のみを示す最小indicatorカード（`github.graphql-diagnostics`）を追加（v0.1では詳細timeline・per-session内訳は表示しない）。いずれのUIテキストも「観測された差分」「相関候補」等の非断定的な表現のみを用い、「Xが消費しました」「confirmed」「exact」は一切使用しない。
+Main dashboardに`GraphQL消費診断`パネルを追加（既存の`GitHub API Rate Limit`/`GitHub Actions`パネルと同じ配置規約）。開始フォーム・ACTIVE sessionカード・最終観測sample行に加えて、以下2つの一覧をMain dashboardのみに表示する（Compact dashboardには追加しない）:
+
+- **Recent Activity Sessions**（session単位の比較表）: actor/label/repository・PR/開始/終了/所要時間/開始時used/終了時used/observed session delta/max valid interval delta/status・stop reason。`session.attribution_status`（baseline時点で1回だけ設定される値）はこのテーブルには一切表示しない。
+- **Sample Timeline**（sample単位の時系列）: 時刻/graphql used/observed delta/その瞬間にactiveだったActivityのlabel（複数重複時は全label列挙、按分・内訳分割は行わない）/attribution status。
+
+reset境界・counter regression・fetch gapを跨ぐケースはいずれも「—」または安全なstatus文言で表示し、数値を捏造しない。
+
+Compact dashboardには既存`section.github`カード群へ「有効/無効」「計測中N件」のみを示す最小indicatorカード（`github.graphql-diagnostics`）を維持する（v0.1同様、詳細timeline・per-session内訳はCompactには表示しない）。いずれのUIテキストも「観測された差分」「相関候補」等の非断定的な表現のみを用い、「Xが消費しました」「confirmed」「exact」は一切使用しない。

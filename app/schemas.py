@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -333,6 +333,22 @@ class CollectorRunRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+def _normalize_naive_utc(value: object) -> object:
+    # SQLite (used in dev/tests; see `app.database.DATABASE_URL`'s default)
+    # has no native timezone-aware storage type -- even a column declared
+    # `DateTime(timezone=True)` silently round-trips a tz-aware value as
+    # naive on that backend. Every datetime these two models ever store is
+    # UTC (written exclusively by GitHubGraphQLDiagnosticsController, whose
+    # clock defaults to `timezone.utc`), so a naive value read back is
+    # unambiguous: re-attach UTC rather than let it serialize as an
+    # offset-less string, which downstream JS `Date` parsing would silently
+    # treat as browser-local time instead of UTC (mirrors
+    # app.github_graphql_diagnostics_controller._normalize_utc).
+    if isinstance(value, datetime) and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 class GitHubDiagnosticSessionRead(BaseModel):
     id: int
     actor_type: str
@@ -353,6 +369,11 @@ class GitHubDiagnosticSessionRead(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    @field_validator("started_at", "ended_at", "reset_at_start", mode="before")
+    @classmethod
+    def normalize_naive_utc(cls, value: object) -> object:
+        return _normalize_naive_utc(value)
+
 
 class GitHubRateSampleRead(BaseModel):
     id: int
@@ -369,6 +390,11 @@ class GitHubRateSampleRead(BaseModel):
     trigger_session_id: int | None
 
     model_config = {"from_attributes": True}
+
+    @field_validator("collected_at", "graphql_reset_at", mode="before")
+    @classmethod
+    def normalize_naive_utc(cls, value: object) -> object:
+        return _normalize_naive_utc(value)
 
 
 class GitHubGraphQLDiagnosticsStatus(BaseModel):

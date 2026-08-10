@@ -11,33 +11,56 @@ Owns the async-facing business logic that ties together:
 - `app.github_graphql_diagnostics_sampler.GitHubGraphQLDiagnosticsSampler`
   (the generic periodic timer that drives `_scheduled_tick`).
 
-Locking discipline mirrors `app.github_rate_limit_state.GitHubRateLimitController`:
-a `threading.RLock` protects the small critical sections that read/mutate
-`self._last_sample_resource`, released before any blocking I/O (subprocess
-calls, DB session use). The public methods are `async def` because their
-callers are FastAPI route handlers; all actual blocking work is offloaded via
-`asyncio.to_thread`.
+Locking discipline: TWO separate locks, for two separate concerns.
+- `self._operation_lock` (`asyncio.Lock`) serializes the ENTIRE body of
+  `start_session` / `stop_session` / `_scheduled_tick` against each other,
+  process-wide -- so at most one of these operations (and therefore at most
+  one in-flight `gh api rate_limit` / `gh api user` call from this feature)
+  is ever running at a time, and DB-visible decisions like "is there an
+  active session from a different GitHub account" can never race against a
+  concurrent operation that hasn't committed yet.
+- `self._lock` (`threading.RLock`) protects the small critical section
+  inside `_take_and_classify_sample` that reads/mutates
+  `self._last_sample_resource`, released before any blocking I/O. This is
+  now a secondary safety net (the operation lock above already guarantees
+  only one caller reaches this section at a time) rather than the sole
+  guarantee, but is kept for defense in depth.
+
+The public methods are `async def` because their callers are FastAPI route
+handlers; all actual blocking work (subprocess calls, DB session use) is
+offloaded via `asyncio.to_thread`, so holding `self._operation_lock` across
+an operation never blocks the rest of the app -- only another call into this
+same feature's start/stop/tick operations queues behind it.
 
 This feature never calls GitHub's GraphQL API. It only ever runs
-`gh api rate_limit` (via `app.github_rate_limit_cli.fetch_github_rate_limit`)
-and, once per session start/stop/tick, `gh api rate_limit` again for the
-periodic samples, plus `gh api user` once per session start (via
-`app.github_graphql_diagnostics_identity.fetch_github_identity`) -- both REST
-endpoints. No `/graphql` request is ever constructed anywhere in this module.
+`gh api rate_limit` (via `app.github_rate_limit_cli.fetch_github_rate_limit`,
+for baseline/final/scheduled samples) and, once per session start, `gh api
+user` (via `app.github_graphql_diagnostics_identity.fetch_github_identity`)
+-- both REST endpoints. No `/graphql` request is ever constructed anywhere
+in this module.
 
-Known v0.1 simplification (documented here and in the implementation report):
-after an auto-transition (max-duration or exhaustion) empties the active
-session set during a scheduled tick, the sampler is intentionally NOT
-stopped as a side effect of that tick. Stopping it would require awaiting
-`self._sampler.stop()` from inside the coroutine the sampler itself is
-currently running (`_scheduled_tick`, invoked as the sampler's `on_tick`),
-which would mean cancelling-and-awaiting its own currently-running task from
-within itself -- a self-referential shutdown that risks deadlocking or
-corrupting the sampler's task bookkeeping. Instead, the sampler simply keeps
-running after such a tick: subsequent ticks just observe zero active
-sessions and record `UNATTRIBUTED` global samples, which is harmless. Only
-an explicit `stop_session` call that reduces the active count to 0, or a
-process restart, actually stops the sampler after this point.
+Sampler auto-stop: when the last ACTIVE session ends for any reason --
+explicit `stop_session`, an auto-transition (`MAX_DURATION` /
+`GRAPHQL_EXHAUSTED`) during a scheduled tick, or a tick that fires and finds
+zero active sessions already (a race against one of the above) -- the
+sampler is stopped, and no further `gh api rate_limit` calls are made until
+a new session starts. This is achieved WITHOUT the sampler ever
+cancelling-and-awaiting its own currently-running task from within itself
+(which would risk deadlocking or corrupting its task bookkeeping): see
+`app.github_graphql_diagnostics_sampler.GitHubGraphQLDiagnosticsSampler`'s
+`on_tick -> bool` contract -- `_scheduled_tick` simply returns `False` when
+there is nothing left to observe, and the sampler's own loop exits
+naturally in response, clearing its task reference the same way an external
+`stop()` call would.
+
+Fetch-failure fail-closed: `_take_and_classify_sample` resets
+`self._last_sample_resource` to `None` whenever a fetch fails, rather than
+leaving the last known-good value in place. This means the NEXT successful
+sample is always treated as a fresh baseline (delta=None,
+outcome="no_previous") instead of being diffed against a sample from before
+an unmeasured gap -- a gap that could span an unrelated session's start/end
+boundary and would otherwise silently fold untracked consumption into what
+looks like a precise, attributable delta.
 """
 
 from __future__ import annotations
@@ -172,6 +195,24 @@ class GitHubGraphQLDiagnosticsController:
         max_minutes: int | None = None,
     ) -> None:
         self._lock = threading.RLock()
+        # Serializes the ENTIRE body of start_session / stop_session /
+        # _scheduled_tick against each other, process-wide -- not just the
+        # small _last_sample_resource critical section below. Without this,
+        # two concurrent operations (e.g. two overlapping `start` calls, or
+        # a `start` racing a scheduled tick) could each independently read
+        # "no active session yet" / fetch / decide account-context state
+        # before either has committed, allowing more than one
+        # gh api rate_limit (or gh api user) call in flight at once and, for
+        # account-context checking specifically, letting two different
+        # accounts' sessions slip past the mismatch check simultaneously.
+        # `asyncio.Lock` (not `threading.Lock`) is correct here: every
+        # acquire/release happens on the event loop thread (these are all
+        # `async def` methods), while the actual blocking subprocess/DB work
+        # inside the locked section is still offloaded via
+        # `asyncio.to_thread` so other, unrelated requests are never stalled
+        # by this lock -- only another call into this same feature's
+        # start/stop/tick operations queues behind it.
+        self._operation_lock = asyncio.Lock()
         self._session_factory = session_factory
         self._fetch = fetch
         self._identity_fetch = identity_fetch
@@ -230,9 +271,10 @@ class GitHubGraphQLDiagnosticsController:
         computes the delta against `self._last_sample_resource` under
         `self._lock`, classifies attribution via
         `app.github_graphql_diagnostics.classify_attribution`, and updates
-        `self._last_sample_resource` on a successful fetch (left unchanged
-        on failure, so the NEXT real sample still diffs against the last
-        known-good value rather than against nothing).
+        `self._last_sample_resource` on a successful fetch. On failure it is
+        reset to `None` (fail-closed), so the NEXT successful sample is
+        always treated as a fresh baseline rather than being diffed across
+        an unmeasured gap.
 
         The lock is held only around the small state read/mutate section,
         never across `self._fetch` itself -- same "release lock during I/O"
@@ -267,7 +309,18 @@ class GitHubGraphQLDiagnosticsController:
                     active_session_count=active_session_count,
                     fetch_failed=True,
                 )
-                # self._last_sample_resource intentionally left unchanged.
+                # Fail-closed: a fetch failure invalidates delta continuity.
+                # An unknown amount of GraphQL consumption could have
+                # occurred during the gap this failure represents -- outside
+                # any tracked activity window boundary -- so the NEXT
+                # successful sample must never be diffed against whatever
+                # was last known-good before this failure (that would
+                # silently fold an unmeasured gap into what looks like a
+                # precise, attributable delta). Resetting to None here means
+                # the next successful sample is treated as "no_previous"
+                # (a fresh baseline), exactly like the very first sample
+                # this controller ever takes.
+                self._last_sample_resource = None
 
         return {
             "report": report,
@@ -349,12 +402,17 @@ class GitHubGraphQLDiagnosticsController:
                     "an existing active session belongs to a different GitHub account context"
                 )
 
-            # The new session about to be created counts as active for this
-            # baseline sample, since collected_at == started_at and
-            # count_active_sessions_at's boundary rule counts a session as
-            # active at the instant it starts.
-            active_session_count_after = len(active) + 1
-            sample_info = self._take_and_classify_sample(now=now, active_session_count=active_session_count_after)
+            # The baseline sample's delta represents the interval BEFORE
+            # this new session existed (previous sample -> this instant) --
+            # the new session was not yet active for any part of that
+            # interval, so it must NOT be counted here. Counting it would
+            # attribute pre-existing consumption to a session that hadn't
+            # started yet. Only sessions that were already ACTIVE before
+            # this call count toward this baseline sample's attribution;
+            # the new session's own activity is only reflected in samples
+            # taken AFTER it exists (the next scheduled tick, or its own
+            # stop's final sample).
+            sample_info = self._take_and_classify_sample(now=now, active_session_count=len(active))
             graphql = sample_info["graphql"]
 
             already_exhausted = graphql is not None and graphql.remaining == 0
@@ -431,27 +489,31 @@ class GitHubGraphQLDiagnosticsController:
         if not diagnostics_enabled_from_env():
             raise GitHubGraphQLDiagnosticsDisabledError()
 
-        identity = await asyncio.to_thread(self._identity_fetch)
-        if not identity.success:
-            raise GitHubGraphQLDiagnosticsIdentityFetchError(identity)
+        async with self._operation_lock:
+            identity = await asyncio.to_thread(self._identity_fetch)
+            if not identity.success:
+                raise GitHubGraphQLDiagnosticsIdentityFetchError(identity)
 
-        now = self._clock()
-        result = await asyncio.to_thread(
-            self._start_session_sync,
-            actor_type=actor_type,
-            label=label,
-            repository=repository,
-            pr_number=pr_number,
-            now=now,
-            identity=identity,
-        )
+            now = self._clock()
+            result = await asyncio.to_thread(
+                self._start_session_sync,
+                actor_type=actor_type,
+                label=label,
+                repository=repository,
+                pr_number=pr_number,
+                now=now,
+                identity=identity,
+            )
 
-        if result["start_sampler"]:
-            # Safe to call unconditionally here (this coroutine runs on the
-            # event loop thread) -- GitHubGraphQLDiagnosticsSampler.start()
-            # is itself idempotent, so a second concurrent session start
-            # never creates a second sampler task.
-            self._sampler.start()
+            if result["start_sampler"]:
+                # Safe to call unconditionally here (this coroutine runs on
+                # the event loop thread) -- GitHubGraphQLDiagnosticsSampler.
+                # start() is itself idempotent, so a second concurrent
+                # session start never creates a second sampler task. Also
+                # still holding self._operation_lock here is what actually
+                # guarantees "second concurrent" is impossible in the first
+                # place -- see the lock's docstring in __init__.
+                self._sampler.start()
 
         return {"session": result["session"], "sample": result["sample"]}
 
@@ -507,22 +569,39 @@ class GitHubGraphQLDiagnosticsController:
         Raises `GitHubGraphQLDiagnosticsSessionNotFoundError` if `session_id`
         does not exist.
         """
-        now = self._clock()
-        result = await asyncio.to_thread(self._stop_session_sync, session_id=session_id, now=now)
-        if result is None:
-            raise GitHubGraphQLDiagnosticsSessionNotFoundError()
+        async with self._operation_lock:
+            now = self._clock()
+            result = await asyncio.to_thread(self._stop_session_sync, session_id=session_id, now=now)
+            if result is None:
+                raise GitHubGraphQLDiagnosticsSessionNotFoundError()
 
-        if result["active_count_after"] == 0:
-            await self._sampler.stop()
+            if result["active_count_after"] == 0:
+                await self._sampler.stop()
 
         return result["payload"]
 
     # -- scheduled tick -------------------------------------------------------
 
-    def _scheduled_tick_sync(self, *, now: datetime) -> None:
+    def _scheduled_tick_sync(self, *, now: datetime) -> bool:
+        """Returns whether the sampler should keep running. `False` means:
+        active sessions were already zero at the very start of this tick (a
+        race between this tick firing and the last session ending some
+        other way), or they became zero as a result of this tick's own
+        auto-transitions below -- in either case, there is nothing left to
+        observe and no `gh api rate_limit` call is made (or, if one was
+        already made this tick, no further ticks will be scheduled)."""
         db = self._session_factory()
         try:
             active = crud.list_active_diagnostic_sessions(db)
+            if not active:
+                # Race: the last active session ended (explicit stop, or an
+                # auto-transition from a previous tick that -- per the
+                # known v0.1 simplification -- didn't stop the sampler
+                # itself) between this tick being scheduled and firing.
+                # Nothing to sample for; skip the fetch entirely and signal
+                # the sampler to stop.
+                return False
+
             windows = [
                 ActivityWindow(started_at=_normalize_utc(session.started_at), ended_at=_normalize_utc(session.ended_at))
                 for session in active
@@ -538,8 +617,9 @@ class GitHubGraphQLDiagnosticsController:
                 # in-progress session in v0.1 -- the sample above is already
                 # recorded with fetch_status="fetch_failed" and
                 # attribution_status="FETCH_FAILED"; active sessions are
-                # left exactly as they are.
-                return
+                # left exactly as they are. Sessions are still present, so
+                # sampling continues.
+                return True
 
             exhausted = graphql.remaining == 0
             for session in active:
@@ -553,19 +633,23 @@ class GitHubGraphQLDiagnosticsController:
                         db, session, now=now, graphql=graphql, stop_reason="GRAPHQL_EXHAUSTED", status="EXHAUSTED"
                     )
 
-            # See the class docstring's "Known v0.1 simplification" section:
-            # even if the loop above just emptied the active set, the
-            # sampler is deliberately NOT stopped here.
+            # Re-check: if the auto-transitions above just emptied the
+            # active set, signal the sampler to stop -- no self-referential
+            # cancel-from-within-self needed (see
+            # GitHubGraphQLDiagnosticsSampler's on_tick contract).
+            return crud.count_active_diagnostic_sessions(db) > 0
         finally:
             db.close()
 
-    async def _scheduled_tick(self) -> None:
+    async def _scheduled_tick(self) -> bool:
         """Invoked by `GitHubGraphQLDiagnosticsSampler` every
         `sample_seconds`, on the event loop thread (per the sampler's
         `start()` contract). All actual work is offloaded to a worker
-        thread."""
-        now = self._clock()
-        await asyncio.to_thread(self._scheduled_tick_sync, now=now)
+        thread. Returns whether the sampler should keep running (see
+        `_scheduled_tick_sync`'s docstring)."""
+        async with self._operation_lock:
+            now = self._clock()
+            return await asyncio.to_thread(self._scheduled_tick_sync, now=now)
 
     # -- startup reconciliation -------------------------------------------------
 

@@ -337,6 +337,314 @@ def test_regression_never_claims_exact_or_confirmed_consumption():
 
 
 # ---------------------------------------------------------------------------
+# Finding 8: githubGraphqlDiagnosticsSessionCardHtml's "相関状態" line must
+# come from last_sample.attribution_status (under the same reset-boundary-
+# safety condition as "現在のGraphQL used"), never from the stale
+# session.attribution_status baseline snapshot.
+# ---------------------------------------------------------------------------
+
+
+def test_session_card_uses_last_sample_attribution_when_window_matches():
+    # session.attribution_status and lastSample.attribution_status are
+    # deliberately different, to prove which one wins.
+    session = _session(attribution_status="SINGLE_ACTIVITY_CORRELATION")
+    last_sample = _sample(
+        attribution_status="OVERLAPPING_ACTIVITIES",
+        graphql_reset_at=session["reset_at_start"],
+        collected_at="2026-08-10T00:10:00+00:00",
+    )
+    html = run_app_js(
+        f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session)}, {json.dumps(last_sample)})"
+    )
+    assert "複数Activityが重複（個別内訳不可）" in html
+    assert "単一Activityと時間的相関" not in html
+
+
+def test_session_card_shows_not_yet_observed_when_last_sample_is_null():
+    session = _session()
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session)}, null)")
+    assert "まだ観測なし" in html
+    assert "単一Activityと時間的相関" not in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+def test_session_card_shows_not_yet_observed_when_last_sample_reset_window_differs():
+    session = _session(reset_at_start="2026-08-10T01:00:00+00:00")
+    last_sample = _sample(graphql_reset_at="2026-08-10T05:00:00+00:00", collected_at="2026-08-10T04:00:00+00:00")
+    html = run_app_js(
+        f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session)}, {json.dumps(last_sample)})"
+    )
+    assert "まだ観測なし" in html
+    assert "単一Activityと時間的相関" not in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+def test_session_card_shows_not_yet_observed_when_last_sample_collected_before_session_started():
+    session = _session(started_at="2026-08-10T00:10:00+00:00", reset_at_start="2026-08-10T01:00:00+00:00")
+    # Same reset window, but collected BEFORE the session started -- must not
+    # be treated as covering this session.
+    last_sample = _sample(
+        graphql_reset_at="2026-08-10T01:00:00+00:00",
+        collected_at="2026-08-10T00:00:00+00:00",
+        attribution_status="OVERLAPPING_ACTIVITIES",
+    )
+    html = run_app_js(
+        f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session)}, {json.dumps(last_sample)})"
+    )
+    assert "まだ観測なし" in html
+    assert "複数Activityが重複（個別内訳不可）" not in html
+
+
+# ---------------------------------------------------------------------------
+# githubGraphqlDiagnosticsSessionComparisonTableHtml (Recent Activity Sessions)
+# ---------------------------------------------------------------------------
+
+
+def _completed_session(**overrides):
+    base = _session(
+        id=7,
+        ended_at="2026-08-10T00:05:00+00:00",
+        graphql_used_start=500,
+        graphql_used_end=560,
+        graphql_delta_total=60,
+        attribution_status="SINGLE_ACTIVITY_CORRELATION",
+        status="STOPPED",
+        stop_reason="USER_STOP",
+    )
+    base["max_valid_interval_delta"] = 30
+    base.update(overrides)
+    return base
+
+
+def test_session_comparison_table_empty_shows_no_history_message():
+    html = run_app_js("app.githubGraphqlDiagnosticsSessionComparisonTableHtml([])")
+    assert "履歴はありません" in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+def test_session_comparison_table_shows_all_fields_for_completed_session():
+    session = _completed_session(
+        actor_type="claude_code",
+        label="PR #25 review",
+        repository="owner/repo",
+        pr_number=25,
+    )
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session)}])")
+    assert "PR #25 review" in html
+    assert "owner/repo" in html
+    assert "#25" in html
+    assert "500" in html  # graphql_used_start
+    assert "560" in html  # graphql_used_end
+    assert "60" in html  # graphql_delta_total
+    assert "30" in html  # max_valid_interval_delta
+    assert "終了（手動）" in html  # STOPPED
+    assert "ユーザー操作による終了" in html  # USER_STOP
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+def test_session_comparison_table_null_delta_with_both_endpoints_measured_shows_anomaly_note():
+    session = _completed_session(graphql_used_start=500, graphql_used_end=560, graphql_delta_total=None)
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session)}])")
+    assert "reset境界または異常検出のため差分判定不可" in html
+
+
+def test_session_comparison_table_null_start_used_shows_bare_dash_not_anomaly_note():
+    session = _completed_session(graphql_used_start=None, graphql_used_end=None, graphql_delta_total=None)
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session)}])")
+    assert "reset境界または異常検出のため差分判定不可" not in html
+    assert "—" in html
+
+
+def test_session_comparison_table_never_shows_session_attribution_status():
+    session = _completed_session(attribution_status="OVERLAPPING_ACTIVITIES")
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session)}])")
+    assert "OVERLAPPING_ACTIVITIES" not in html
+    assert "複数Activityが重複（個別内訳不可）" not in html
+    assert "単一Activityと時間的相関" not in html
+
+
+def test_session_comparison_table_active_session_shows_measuring_in_progress():
+    session = _session(ended_at=None, status="ACTIVE", stop_reason=None)
+    html = run_app_js(f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session)}])")
+    assert "計測中" in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+# ---------------------------------------------------------------------------
+# githubGraphqlDiagnosticsActiveSessionsAtSample
+# ---------------------------------------------------------------------------
+
+
+def test_active_sessions_at_sample_empty_when_none_cover_instant():
+    session = _session(started_at="2026-08-10T01:00:00+00:00", ended_at="2026-08-10T02:00:00+00:00")
+    sample = _sample(collected_at="2026-08-10T00:00:00+00:00")
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(sample)}, [{json.dumps(session)}])"
+    )
+    assert result == []
+
+
+def test_active_sessions_at_sample_one_session_covers_instant():
+    session = _session(id=1, started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    sample = _sample(collected_at="2026-08-10T00:05:00+00:00")
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(sample)}, [{json.dumps(session)}])"
+    )
+    assert len(result) == 1
+    assert result[0]["id"] == 1
+
+
+def test_active_sessions_at_sample_two_overlapping_sessions_both_returned():
+    session_a = _session(id=1, started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    session_b = _session(id=2, started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    sample = _sample(collected_at="2026-08-10T00:05:00+00:00")
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(sample)}, "
+        f"[{json.dumps(session_a)}, {json.dumps(session_b)}])"
+    )
+    assert len(result) == 2
+
+
+def test_active_sessions_at_sample_boundary_inclusive_at_ended_at():
+    session = _session(started_at="2026-08-10T00:00:00+00:00", ended_at="2026-08-10T00:05:00+00:00")
+    sample = _sample(collected_at="2026-08-10T00:05:00+00:00")
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(sample)}, [{json.dumps(session)}])"
+    )
+    assert len(result) == 1
+
+
+def test_active_sessions_at_sample_boundary_inclusive_at_started_at():
+    session = _session(started_at="2026-08-10T00:05:00+00:00", ended_at=None)
+    sample = _sample(collected_at="2026-08-10T00:05:00+00:00")
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(sample)}, [{json.dumps(session)}])"
+    )
+    assert len(result) == 1
+
+
+def test_active_sessions_at_sample_excludes_session_from_its_own_start_baseline_sample():
+    # Regression guard found during this round's manual UI check: a
+    # session's own start-baseline sample must NOT list that session as
+    # "active", because the backend's attribution_status for that exact
+    # sample (Finding 2) was classified using only PRE-EXISTING sessions --
+    # showing the just-started session here would contradict a
+    # SINGLE_ACTIVITY_CORRELATION/UNATTRIBUTED status stored on the same row.
+    session_a = _session(id=1, label="Session A", started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    session_b = _session(id=2, label="Session B", started_at="2026-08-10T00:05:00+00:00", ended_at=None)
+    baseline_sample = _sample(
+        collected_at="2026-08-10T00:05:00+00:00",
+        trigger_session_id=2,
+        attribution_status="SINGLE_ACTIVITY_CORRELATION",
+    )
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(baseline_sample)}, "
+        f"[{json.dumps(session_a)}, {json.dumps(session_b)}])"
+    )
+    assert [row["id"] for row in result] == [1]
+
+
+def test_active_sessions_at_sample_includes_stopping_session_on_its_own_final_sample():
+    # The stop case is intentionally NOT excluded: the backend includes the
+    # stopping session in active_session_count for its own final sample
+    # (it was active for the whole interval leading up to that instant), so
+    # the frontend's label list must agree and still show it.
+    session = _session(
+        id=1,
+        label="Session A",
+        started_at="2026-08-10T00:00:00+00:00",
+        ended_at="2026-08-10T00:10:00+00:00",
+    )
+    final_sample = _sample(collected_at="2026-08-10T00:10:00+00:00", trigger_session_id=1)
+    result = run_app_js(
+        f"app.githubGraphqlDiagnosticsActiveSessionsAtSample({json.dumps(final_sample)}, [{json.dumps(session)}])"
+    )
+    assert [row["id"] for row in result] == [1]
+
+
+# ---------------------------------------------------------------------------
+# githubGraphqlDiagnosticsTimelineTableHtml / githubGraphqlDiagnosticsTimelineRowHtml
+# ---------------------------------------------------------------------------
+
+
+def test_timeline_table_null_delta_shows_dash_not_zero_or_undefined_or_nan():
+    sample = _sample(graphql_delta=None)
+    html = run_app_js(f"app.githubGraphqlDiagnosticsTimelineTableHtml([{json.dumps(sample)}], [])")
+    assert "—" in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+    # graphql_delta was explicitly null -- it must not be displayed as 0.
+    assert ">0<" not in html
+
+
+def test_timeline_table_two_active_sessions_shows_both_labels_no_numeric_split():
+    session_a = _session(id=1, label="PR #25 review", started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    session_b = _session(id=2, label="Issue triage", started_at="2026-08-10T00:00:00+00:00", ended_at=None)
+    sample = _sample(collected_at="2026-08-10T00:05:00+00:00")
+    html = run_app_js(
+        f"app.githubGraphqlDiagnosticsTimelineTableHtml([{json.dumps(sample)}], "
+        f"[{json.dumps(session_a)}, {json.dumps(session_b)}])"
+    )
+    assert "PR #25 review" in html
+    assert "Issue triage" in html
+    for forbidden in ("それぞれ", "按分", "50%ずつ", "均等"):
+        assert forbidden not in html
+
+
+def test_timeline_table_empty_samples_shows_no_samples_message():
+    html = run_app_js("app.githubGraphqlDiagnosticsTimelineTableHtml([], [])")
+    assert "サンプルはありません" in html
+    assert "undefined" not in html
+    assert "NaN" not in html
+
+
+def test_timeline_row_html_handles_all_null_delta_fetch_statuses_safely():
+    for fetch_status in ("reset_boundary", "counter_regression", "fetch_failed", "no_previous"):
+        sample = _sample(fetch_status=fetch_status, graphql_delta=None)
+        html = run_app_js(f"app.githubGraphqlDiagnosticsTimelineRowHtml({json.dumps(sample)}, [])")
+        assert "undefined" not in html
+        assert "NaN" not in html
+        assert "—" in html
+
+
+# ---------------------------------------------------------------------------
+# Regression guard across all new rendering functions
+# ---------------------------------------------------------------------------
+
+
+def test_regression_new_functions_never_leak_undefined_nan_or_forbidden_claims():
+    session_active = _session()
+    session_completed = _completed_session()
+    sample_with_delta = _sample()
+    sample_null_delta = _sample(graphql_delta=None, fetch_status="reset_boundary")
+
+    htmls = [
+        run_app_js(
+            f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session_active)}, {json.dumps(sample_with_delta)})"
+        ),
+        run_app_js(f"app.githubGraphqlDiagnosticsSessionCardHtml({json.dumps(session_active)}, null)"),
+        run_app_js(
+            f"app.githubGraphqlDiagnosticsSessionComparisonTableHtml([{json.dumps(session_active)}, {json.dumps(session_completed)}])"
+        ),
+        run_app_js("app.githubGraphqlDiagnosticsSessionComparisonTableHtml([])"),
+        run_app_js(
+            f"app.githubGraphqlDiagnosticsTimelineTableHtml([{json.dumps(sample_with_delta)}, {json.dumps(sample_null_delta)}], "
+            f"[{json.dumps(session_active)}])"
+        ),
+        run_app_js("app.githubGraphqlDiagnosticsTimelineTableHtml([], [])"),
+    ]
+    forbidden_strings = ("undefined", "NaN", "が消費しました", "confirmed", "exact")
+    for html in htmls:
+        for forbidden in forbidden_strings:
+            assert forbidden not in html, f"'{forbidden}' leaked into rendered HTML: {html}"
+
+
+# ---------------------------------------------------------------------------
 # syntax check
 # ---------------------------------------------------------------------------
 

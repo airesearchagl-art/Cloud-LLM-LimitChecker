@@ -9,7 +9,7 @@ from app.github_graphql_diagnostics_sampler import GitHubGraphQLDiagnosticsSampl
 def test_start_creates_exactly_one_task_and_is_idempotent():
     async def scenario():
         async def on_tick():
-            pass
+            return True
 
         sampler = GitHubGraphQLDiagnosticsSampler(
             interval_seconds=1000, on_tick=on_tick, sleep=lambda s: asyncio.sleep(0)
@@ -29,7 +29,7 @@ def test_start_creates_exactly_one_task_and_is_idempotent():
 def test_stop_cancels_task_and_is_idempotent():
     async def scenario():
         async def on_tick():
-            pass
+            return True
 
         sampler = GitHubGraphQLDiagnosticsSampler(
             interval_seconds=1000, on_tick=on_tick, sleep=lambda s: asyncio.sleep(10)
@@ -49,7 +49,7 @@ def test_stop_cancels_task_and_is_idempotent():
 # 3. is_running reflects state before start / after stop
 def test_is_running_false_before_start():
     async def on_tick():
-        pass
+        return True
 
     sampler = GitHubGraphQLDiagnosticsSampler(interval_seconds=10, on_tick=on_tick)
     assert sampler.is_running is False
@@ -62,6 +62,7 @@ def test_on_tick_awaited_once_per_interval():
 
         async def on_tick():
             tick_count["n"] += 1
+            return True
 
         sleep_calls = []
 
@@ -90,6 +91,7 @@ def test_exception_in_on_tick_does_not_kill_the_loop():
             tick_count["n"] += 1
             if tick_count["n"] == 1:
                 raise RuntimeError("boom")
+            return True
 
         sleep_calls = []
 
@@ -115,7 +117,7 @@ def test_exception_in_on_tick_does_not_kill_the_loop():
 def test_repeated_start_stop_cycles_never_leave_a_task():
     async def scenario():
         async def on_tick():
-            pass
+            return True
 
         sampler = GitHubGraphQLDiagnosticsSampler(
             interval_seconds=1000, on_tick=on_tick, sleep=lambda s: asyncio.sleep(0)
@@ -130,7 +132,38 @@ def test_repeated_start_stop_cycles_never_leave_a_task():
     asyncio.run(scenario())
 
 
-# 7. this module has no business logic -- no DB / gh / session references
+# 8. on_tick returning False stops the loop naturally (no cancellation),
+#    is_running correctly reports False afterward, and a later start() call
+#    works normally again -- the Finding 1 contract change this module's
+#    docstring documents.
+def test_on_tick_false_stops_loop_naturally_and_start_works_again():
+    async def scenario():
+        async def on_tick():
+            return False
+
+        sampler = GitHubGraphQLDiagnosticsSampler(
+            interval_seconds=1000, on_tick=on_tick, sleep=lambda s: asyncio.sleep(0)
+        )
+        sampler.start()
+        task = sampler._task
+        # The task must complete normally (return, not raise) once on_tick
+        # says "stop" -- no external cancellation is involved here at all.
+        await asyncio.wait_for(task, timeout=5)
+        assert sampler.is_running is False
+        assert sampler._task is None
+
+        # A later start() call is not left in some broken half-stopped
+        # state -- it must create a fresh task and run normally again.
+        sampler.start()
+        assert sampler.is_running is True
+        assert sampler._task is not task
+        await sampler.stop()
+        assert sampler.is_running is False
+
+    asyncio.run(scenario())
+
+
+# 9. this module has no business logic -- no DB / gh / session references
 def test_module_is_business_logic_free():
     import inspect
 

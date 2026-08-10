@@ -594,12 +594,21 @@ function githubGraphqlDiagnosticsStartFormHtml() {
 // lastSampleがある場合のみ「現在のGraphQL used」を出す。reset境界を跨いだ
 // (lastSample.graphql_reset_at !== session.reset_at_start)場合は、古い/無意味な
 // 数値を出さず、専用の判定不可メッセージにする(spec section 8)。
+//
+// Finding 8: 「相関状態」はsession.attribution_status(作成時のbaselineサンプル
+// から一度だけ設定され、以後は更新されない)ではなく、lastSample.attribution_status
+// (statusエンドポイントの最新観測)から算出する -- ただしlastSampleがこの
+// sessionの計測窓を実際にカバーしている場合に限る(lastSample !== null かつ
+// lastSample.graphql_reset_at === session.reset_at_start かつ
+// lastSample.collected_at >= session.started_at。reset境界安全性チェックは
+// 「現在のGraphQL used」で使っているものと同じ比較を流用しつつ、開始前の
+// サンプルを拾わないようcollected_atの下限も追加している)。該当する
+// lastSampleが無ければ、stale/不正確な値の代わりに中立な「まだ観測なし」を出す。
 function githubGraphqlDiagnosticsSessionCardHtml(session, lastSample) {
   const actorType = escapeHtml(session.actor_type);
   const label = escapeHtml(session.label);
   const startedAt = escapeHtml(fmtDate(session.started_at));
   const baselineUsed = fmtNumber(session.graphql_used_start);
-  const attributionLabel = escapeHtml(githubGraphqlDiagnosticsAttributionLabel(session.attribution_status));
   const sessionId = escapeHtml(String(session.id));
 
   let currentUsedText;
@@ -610,6 +619,14 @@ function githubGraphqlDiagnosticsSessionCardHtml(session, lastSample) {
   } else {
     currentUsedText = fmtNumber(lastSample.graphql_used);
   }
+
+  const lastSampleCoversSession =
+    !!lastSample &&
+    lastSample.graphql_reset_at === session.reset_at_start &&
+    lastSample.collected_at >= session.started_at;
+  const attributionLabel = lastSampleCoversSession
+    ? escapeHtml(githubGraphqlDiagnosticsAttributionLabel(lastSample.attribution_status))
+    : "まだ観測なし";
 
   const repositoryLine = session.repository
     ? `<div class="github-graphql-diagnostics-meta">Repository: ${escapeHtml(session.repository)}${
@@ -650,6 +667,211 @@ function githubGraphqlDiagnosticsLastSampleHtml(lastSample) {
   return `<p class="muted">最終観測: ${collectedAt} ／ GraphQL used ${graphqlUsed} ／ 観測された差分 ${delta} ／ ${attributionLabel}</p>`;
 }
 
+// ----------------------------------------------------------------------------
+// Recent Activity Sessions(完了/計測中セッションの比較表示)
+// ----------------------------------------------------------------------------
+
+const GITHUB_GRAPHQL_DIAGNOSTICS_SESSION_STATUS_LABELS = {
+  ACTIVE: "計測中",
+  STOPPED: "終了（手動）",
+  AUTO_STOPPED: "自動終了",
+  EXHAUSTED: "枠を使い切り終了",
+  ABORTED: "異常終了",
+};
+
+// DOMに触れない純粋関数: session.status(enum値)を短い日本語ラベルへ変換する。
+// 未知の値は生のenum文字列を単独露出させず「不明」にfallbackする。
+function githubGraphqlDiagnosticsSessionStatusLabel(status) {
+  return GITHUB_GRAPHQL_DIAGNOSTICS_SESSION_STATUS_LABELS[status] || "不明";
+}
+
+const GITHUB_GRAPHQL_DIAGNOSTICS_STOP_REASON_LABELS = {
+  USER_STOP: "ユーザー操作による終了",
+  MAX_DURATION: "最大計測時間に到達",
+  GRAPHQL_EXHAUSTED: "GraphQL枠を使い切り",
+  PROCESS_RESTART: "プロセス再起動により終了",
+};
+
+// DOMに触れない純粋関数: session.stop_reason(enum値、ACTIVEなsessionではnull)を
+// 短い日本語ラベルへ変換する。null/undefinedは「まだ終了していない」ことを示す
+// "—"(未取得の"不明"とは区別する)。
+function githubGraphqlDiagnosticsStopReasonLabel(stopReason) {
+  if (stopReason === null || stopReason === undefined) return "—";
+  return GITHUB_GRAPHQL_DIAGNOSTICS_STOP_REASON_LABELS[stopReason] || "不明";
+}
+
+// DOMに触れない純粋関数: started_at/ended_atから人間可読な計測時間を作る。
+// ended_atがまだ無い(計測中の)sessionはdurationを計算せず「計測中」を返す。
+function githubGraphqlDiagnosticsSessionDurationText(startedAt, endedAt) {
+  if (!endedAt) return "計測中";
+  const startMs = new Date(startedAt).getTime();
+  const endMs = new Date(endedAt).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return "—";
+  return fmtDurationJa((endMs - startMs) / 1000);
+}
+
+// DOMに触れない純粋関数: 完了/計測中セッション1件ぶんの比較行HTML。
+// session.attribution_status(baseline取得時に一度だけ設定され、以後更新
+// されない値)はここでは絶対に表示しない -- 相関状態の履歴はSample Timeline
+// (githubGraphqlDiagnosticsTimelineTableHtml)側の役割とする(Finding 8)。
+//
+// observed session delta(graphql_delta_total)がnullのとき、開始/終了の
+// どちらのGraphQL usedも取得できている(=「未計測」ではない)場合は、
+// reset境界またはcounter regressionでdelta判定ができなかったことを示す
+// 専用の注記を出す(app/github_graphql_diagnostics.pyのcompute_session_total_delta
+// 参照)。どちらの原因だったかは判別できないため、断定はしない。
+function githubGraphqlDiagnosticsSessionComparisonRowHtml(session) {
+  const actorType = escapeHtml(session.actor_type);
+  const label = escapeHtml(session.label);
+  const sessionId = escapeHtml(String(session.id));
+
+  const repositoryLine =
+    session.repository || session.pr_number
+      ? `<div class="github-graphql-diagnostics-meta">Repository: ${escapeHtml(session.repository || "")}${
+          session.pr_number ? ` #${escapeHtml(String(session.pr_number))}` : ""
+        }</div>`
+      : "";
+
+  const startedAt = escapeHtml(fmtDate(session.started_at));
+  const endedAt = session.ended_at ? escapeHtml(fmtDate(session.ended_at)) : "計測中";
+  const duration = escapeHtml(githubGraphqlDiagnosticsSessionDurationText(session.started_at, session.ended_at));
+
+  const startUsed = escapeHtml(fmtExactOrDash(session.graphql_used_start));
+  const endUsed = escapeHtml(fmtExactOrDash(session.graphql_used_end));
+
+  const hasBothEndpointsMeasured =
+    session.graphql_used_start !== null &&
+    session.graphql_used_start !== undefined &&
+    session.graphql_used_end !== null &&
+    session.graphql_used_end !== undefined;
+
+  let deltaText;
+  if (session.graphql_delta_total !== null && session.graphql_delta_total !== undefined) {
+    deltaText = fmtNumber(session.graphql_delta_total);
+  } else if (hasBothEndpointsMeasured) {
+    deltaText = "reset境界または異常検出のため差分判定不可";
+  } else {
+    deltaText = "—";
+  }
+  deltaText = escapeHtml(deltaText);
+
+  const maxIntervalDelta = escapeHtml(fmtExactOrDash(session.max_valid_interval_delta));
+
+  const statusLabel = githubGraphqlDiagnosticsSessionStatusLabel(session.status);
+  const stopReasonLabel = githubGraphqlDiagnosticsStopReasonLabel(session.stop_reason);
+  const statusText = escapeHtml(stopReasonLabel === "—" ? statusLabel : `${statusLabel} / ${stopReasonLabel}`);
+
+  return `
+    <div class="github-graphql-diagnostics-history-row" data-session-id="${sessionId}">
+      <div class="github-graphql-diagnostics-session-head">
+        <span class="github-graphql-diagnostics-actor">${actorType}</span>
+        <span class="github-graphql-diagnostics-label">${label}</span>
+      </div>
+      ${repositoryLine}
+      <div class="github-graphql-diagnostics-meta">開始: ${startedAt} ／ 終了: ${endedAt} ／ 計測時間: ${duration}</div>
+      <div class="github-graphql-diagnostics-meta">開始時点のGraphQL used: ${startUsed} ／ 終了時点のGraphQL used: ${endUsed}</div>
+      <div class="github-graphql-diagnostics-meta">観測されたSession全体の差分: ${deltaText}</div>
+      <div class="github-graphql-diagnostics-meta">最大区間差分: ${maxIntervalDelta}</div>
+      <div class="github-graphql-diagnostics-meta">状態: ${statusText}</div>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: GET /api/github-graphql-diagnostics/sessions のitems配列
+// (完了済みも計測中も両方含む)から、「Recent Activity Sessions」比較表全体の
+// HTMLを組み立てる。空配列のときは表の代わりに固定メッセージを出す。
+function githubGraphqlDiagnosticsSessionComparisonTableHtml(sessions) {
+  const rows = Array.isArray(sessions) ? sessions : [];
+  if (!rows.length) {
+    return `<p class="muted">履歴はありません。</p>`;
+  }
+  const body = rows.map((session) => githubGraphqlDiagnosticsSessionComparisonRowHtml(session)).join("");
+  return `
+    <h3>Recent Activity Sessions</h3>
+    <p class="muted">相関状態(の推移)はSample Timelineで確認できます。ここではstatus/stop_reasonのみを表示します。</p>
+    <div class="github-graphql-diagnostics-history">${body}</div>`;
+}
+
+// ----------------------------------------------------------------------------
+// Sample Timeline
+// ----------------------------------------------------------------------------
+
+// DOMに触れない純粋関数: sessions配列のうち、sample.collected_atの瞬間に
+// activeだったものだけを返す。app/github_graphql_diagnostics.pyの
+// count_active_sessions_at/ActivityWindowと同じ境界含む(boundary-inclusive)
+// 判定 -- started_at <= instant かつ (ended_at is null または ended_at >= instant)
+// -- をミラーする。fmtDateと同じくnew Date(...)経由の数値比較にすることで、
+// このファイル内での日時パース方法を統一する。
+function githubGraphqlDiagnosticsActiveSessionsAtSample(sample, sessions) {
+  const rows = Array.isArray(sessions) ? sessions : [];
+  const instant = new Date(sample.collected_at).getTime();
+  return rows.filter((session) => {
+    const startedAt = new Date(session.started_at).getTime();
+    const endedAt =
+      session.ended_at === null || session.ended_at === undefined ? null : new Date(session.ended_at).getTime();
+    // A session's own start-baseline sample is a special case: the backend
+    // (app/github_graphql_diagnostics_controller.py's `_start_session_sync`)
+    // deliberately classifies that specific sample's attribution using only
+    // PRE-EXISTING active sessions, excluding the session that is about to
+    // be created -- its baseline interval is the time BEFORE this instant,
+    // when it did not exist yet. Without this exclusion, this function's
+    // ordinary boundary-inclusive check (startedAt <= instant) would still
+    // list that session as "active", contradicting the sample's own
+    // attribution_status (e.g. showing 2 Active Activity labels next to a
+    // stored "SINGLE_ACTIVITY_CORRELATION"/single-activity classification).
+    const isOwnStartBaselineSample = sample.trigger_session_id === session.id && startedAt === instant;
+    if (isOwnStartBaselineSample) {
+      return false;
+    }
+    return startedAt <= instant && (endedAt === null || endedAt >= instant);
+  });
+}
+
+// DOMに触れない純粋関数: サンプル1件ぶんのタイムライン行HTML。activeLabelsは
+// githubGraphqlDiagnosticsActiveSessionsAtSampleの結果から呼び出し側が
+// 取り出したlabel文字列の配列 -- ここでは複数件あってもラベルを列挙する
+// だけで、per-session数値内訳(按分)は一切計算・表示しない。
+function githubGraphqlDiagnosticsTimelineRowHtml(sample, activeLabels) {
+  const time = escapeHtml(fmtDate(sample.collected_at));
+  const used = escapeHtml(fmtExactOrDash(sample.graphql_used));
+  const delta = escapeHtml(fmtExactOrDash(sample.graphql_delta));
+  const labels = Array.isArray(activeLabels) ? activeLabels : [];
+  const activityText = labels.length ? escapeHtml(labels.join(", ")) : "—";
+  const attributionLabel = escapeHtml(githubGraphqlDiagnosticsAttributionLabel(sample.attribution_status));
+
+  return `
+    <div class="github-graphql-diagnostics-timeline-row">
+      <div class="github-graphql-diagnostics-meta">時刻: ${time}</div>
+      <div class="github-graphql-diagnostics-meta">GraphQL used: ${used}</div>
+      <div class="github-graphql-diagnostics-meta">観測された差分: ${delta}</div>
+      <div class="github-graphql-diagnostics-meta">Active Activity: ${activityText}</div>
+      <div class="github-graphql-diagnostics-meta">相関状態: ${attributionLabel}</div>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: GET /api/github-graphql-diagnostics/samples のitems配列
+// (最新50件を想定)と、GET /api/github-graphql-diagnostics/sessions のitems配列
+// から、Sample Timeline全体のHTMLを組み立てる。sample.fetch_statusが
+// "reset_boundary"/"counter_regression"/"fetch_failed"/"no_previous"のいずれで
+// あってもgraphql_deltaはnullであり、"—"に落ちるだけでcrash/undefined/NaNには
+// ならない(fmtExactOrDash経由)。空配列のときは表の代わりに固定メッセージを出す。
+function githubGraphqlDiagnosticsTimelineTableHtml(samples, sessions) {
+  const rows = Array.isArray(samples) ? samples : [];
+  if (!rows.length) {
+    return `<p class="muted">サンプルはありません。</p>`;
+  }
+  const sessionRows = Array.isArray(sessions) ? sessions : [];
+  const body = rows
+    .map((sample) => {
+      const activeSessions = githubGraphqlDiagnosticsActiveSessionsAtSample(sample, sessionRows);
+      const activeLabels = activeSessions.map((session) => session.label);
+      return githubGraphqlDiagnosticsTimelineRowHtml(sample, activeLabels);
+    })
+    .join("");
+  return `
+    <h3>Sample Timeline</h3>
+    <div class="github-graphql-diagnostics-timeline">${body}</div>`;
+}
+
 // DOMに触れない純粋関数: GET /api/github-graphql-diagnostics のレスポンスから
 // パネル全体のHTMLを組み立てる。data.enabled === falseのときはstart formすら
 // 出さない(無効時に開始操作を誘発しないため)。
@@ -684,6 +906,37 @@ async function refreshGithubGraphqlDiagnostics() {
   state.githubGraphqlDiagnostics = data;
   renderGithubGraphqlDiagnostics(data);
   return data;
+}
+
+// Recent Activity Sessions + Sample Timelineをまとめて描画する。sessionsは
+// タイムライン側の「そのサンプル時点でどのActivityがactiveだったか」の判定にも
+// 使うため、1回のfetchで両方の描画に使い回す(2回目のsessions fetchはしない)。
+function renderGithubGraphqlDiagnosticsSessions(sessions, samples) {
+  const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
+  if (sessionsTarget) {
+    sessionsTarget.innerHTML = githubGraphqlDiagnosticsSessionComparisonTableHtml(sessions);
+  }
+  const timelineTarget = document.querySelector("#githubGraphqlDiagnosticsTimelineResult");
+  if (timelineTarget) {
+    timelineTarget.innerHTML = githubGraphqlDiagnosticsTimelineTableHtml(samples, sessions);
+  }
+}
+
+// 状態パネル本体(GET /api/github-graphql-diagnostics)とは別の、独立した
+// fetch/再描画サイクル。sessions/samplesの履歴は状態パネルほど頻繁に
+// 更新される必要が無いため、loadAll()の主Promise.allには含めない
+// (ここが失敗してもメインダッシュボード側は壊さない -- 呼び出し側で
+// catchする設計)。GET /sessions?limit=20、GET /samples?limit=50 は
+// どちらも読み取り専用でstart/stopのような副作用は無い。
+async function refreshGithubGraphqlDiagnosticsSessions() {
+  const [sessionsResponse, samplesResponse] = await Promise.all([
+    api("/api/github-graphql-diagnostics/sessions?limit=20"),
+    api("/api/github-graphql-diagnostics/samples?limit=50"),
+  ]);
+  const sessions = Array.isArray(sessionsResponse.items) ? sessionsResponse.items : [];
+  const samples = Array.isArray(samplesResponse.items) ? samplesResponse.items : [];
+  renderGithubGraphqlDiagnosticsSessions(sessions, samples);
+  return { sessions, samples };
 }
 
 function applyFiltersAndSort(rows) {
@@ -1561,6 +1814,10 @@ function initApp() {
         return;
       }
       await refreshGithubGraphqlDiagnostics();
+      // Recent Activity Sessions / Sample Timelineの再取得はあくまで補助表示の
+      // 更新であり、これが失敗してもstart自体は成功しているので、失敗を
+      // start操作のエラーとしてresultSlotへ表示しない(握りつぶして良い)。
+      await refreshGithubGraphqlDiagnosticsSessions().catch(() => {});
     } catch (error) {
       const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
       resultSlot.innerHTML = `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`;
@@ -1589,6 +1846,8 @@ function initApp() {
         return;
       }
       await refreshGithubGraphqlDiagnostics();
+      // 同上: 補助表示の再取得失敗はstop操作自体のエラーとして表示しない。
+      await refreshGithubGraphqlDiagnosticsSessions().catch(() => {});
     } catch (error) {
       const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
       githubGraphqlDiagnosticsContainer.insertAdjacentHTML(
@@ -1676,6 +1935,19 @@ function initApp() {
   loadAll().catch((error) => {
     document.querySelector("#cards").innerHTML = `<div class="card error">${escapeHtml(error.message)}</div>`;
   });
+  // メインダッシュボード(#cards)のloadAll()とは独立した読み込みサイクル。
+  // ここが失敗してもメインダッシュボードは壊さず、Recent Activity Sessions /
+  // Sample Timelineの領域内だけに固定メッセージを出す。
+  refreshGithubGraphqlDiagnosticsSessions().catch(() => {
+    const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
+    if (sessionsTarget) {
+      sessionsTarget.innerHTML = `<p class="muted">履歴の取得に失敗しました。</p>`;
+    }
+    const timelineTarget = document.querySelector("#githubGraphqlDiagnosticsTimelineResult");
+    if (timelineTarget) {
+      timelineTarget.innerHTML = `<p class="muted">サンプルの取得に失敗しました。</p>`;
+    }
+  });
 }
 
 if (typeof document !== "undefined") {
@@ -1714,6 +1986,14 @@ if (typeof module !== "undefined") {
     githubGraphqlDiagnosticsSessionCardHtml,
     githubGraphqlDiagnosticsLastSampleHtml,
     githubGraphqlDiagnosticsRenderPanel,
+    githubGraphqlDiagnosticsSessionStatusLabel,
+    githubGraphqlDiagnosticsStopReasonLabel,
+    githubGraphqlDiagnosticsSessionDurationText,
+    githubGraphqlDiagnosticsSessionComparisonRowHtml,
+    githubGraphqlDiagnosticsSessionComparisonTableHtml,
+    githubGraphqlDiagnosticsActiveSessionsAtSample,
+    githubGraphqlDiagnosticsTimelineRowHtml,
+    githubGraphqlDiagnosticsTimelineTableHtml,
     codexRateLimitsErrorDisplay,
     confirmClaudeDesktopCloudUsageSave,
     parseDatetimeLocalToIsoOrNull,
