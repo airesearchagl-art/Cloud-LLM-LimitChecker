@@ -81,6 +81,7 @@ from app.github_rate_limit_state import (
 )
 from app.seed import seed_from_yaml
 from app.time_utils import app_tz
+from app.usage_allowance import build_usage_allowance_payload
 from app.safety import (
     CollectorDailyLimitExceededError,
     UnknownCollectorVendorError,
@@ -971,6 +972,29 @@ def refresh_codex_rate_limits() -> dict:
             },
         ) from exc
     return _codex_rate_limits_response(_current_utc_time())
+
+
+@app.get("/api/usage-allowances", response_model=schemas.UsageAllowanceResponse)
+def get_usage_allowances() -> dict:
+    """Provider-agnostic read model over the existing local usage caches.
+
+    No outbound I/O, no subprocess, no database, no write — but not "no I/O":
+    this reads the same local cache files the per-provider GETs above already
+    read, using their own loaders, and then hands the resulting snapshots to a
+    pure projection. It never starts Codex App Server, never triggers a
+    refresh, and never re-reads a raw vendor payload.
+
+    Adding a provider here must not change any existing endpoint: this route
+    is additive and the per-provider GETs stay the compatibility surface.
+    """
+    now = _current_utc_time()
+    return build_usage_allowance_payload(
+        generated_at=now,
+        codex_rate_limits=codex_rate_limits_cache.load_snapshot(now=now),
+        codex_manual=codex_usage_cache.load_snapshot(now=now),
+        claude_code=load_claude_code_usage_snapshot(now=now),
+        claude_desktop_cloud=claude_desktop_cloud_usage_cache.load_snapshot(now=now),
+    )
 
 
 @app.get("/compact", include_in_schema=False)
