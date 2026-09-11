@@ -18,6 +18,7 @@ No dead code for any of those exists yet, so there is nothing to assert.
 """
 
 import ast
+import inspect
 import json
 import subprocess
 import urllib.request
@@ -710,6 +711,155 @@ def test_all_sources_broken_still_answers_without_an_error_payload(
     assert response.status_code == 200
     assert payload["allowances"] == []
     assert [entry["status"] for entry in payload["unavailable"]] == ["invalid_cache"] * 4
+
+
+# ---------------------------------------------------------------------------
+# 5c. Loader-level exception isolation
+#
+# The tests above break the cache *file*, which every loader already converts
+# into a status. These break the loader *call* itself — the case a loader
+# cannot absorb, because it can raise before reaching its own try block (path
+# resolution is outside it). Four sources share one response here, so that
+# must cost one source, not the endpoint.
+#
+# Patch targets are the names the route actually resolves: the module
+# attribute for three of them, and `app.main`'s own global for the Claude Code
+# loader, which `app/main.py` binds directly via `from ... import ... as ...`.
+# Patching the defining module for that one would not be seen by the route.
+# ---------------------------------------------------------------------------
+
+SECRET_MARKER = "SECRET-MARKER"
+
+LOADER_PATCH_TARGETS = {
+    "codex_rate_limits": ("app.codex_rate_limits_cache.load_snapshot", "work_codex", "OFFICIAL_LOCAL_RUNTIME"),
+    "codex_manual": ("app.codex_usage_cache.load_snapshot", "work_codex", "MANUAL"),
+    "claude_code": ("app.main.load_claude_code_usage_snapshot", "claude_code", "LOCAL_OBSERVATION"),
+    "claude_desktop": (
+        "app.claude_desktop_cloud_usage_cache.load_snapshot",
+        "claude_desktop_cloud",
+        "MANUAL",
+    ),
+}
+
+
+def _raising_loader(**kwargs):
+    raise RuntimeError(SECRET_MARKER)
+
+
+def test_a_raising_loader_does_not_take_down_the_other_sources(
+    client: TestClient, cache_paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_all_caches(cache_paths)
+    monkeypatch.setattr("app.codex_rate_limits_cache.load_snapshot", _raising_loader)
+
+    response = client.get("/api/usage-allowances")
+    payload = response.json()
+
+    assert response.status_code == 200
+
+    # The three healthy sources keep their windows.
+    assert bucket_for(payload, "claude_code", "LOCAL_OBSERVATION")["windows"]
+    assert bucket_for(payload, "claude_desktop_cloud", "MANUAL")["windows"]
+    assert bucket_for(payload, "work_codex", "MANUAL")["windows"]
+
+    # The failing one degrades to an unavailable entry with a status from the
+    # existing vocabulary — not a new status, and not a zeroed bucket.
+    assert payload["unavailable"] == [
+        {
+            "provider": "openai",
+            "product_surface": "work_codex",
+            "status": "invalid_cache",
+            "source_kind": "OFFICIAL_LOCAL_RUNTIME",
+        }
+    ]
+    assert all(b["source_kind"] != "OFFICIAL_LOCAL_RUNTIME" for b in payload["allowances"])
+
+    # Nothing about the failure reaches the wire.
+    for forbidden in (SECRET_MARKER, "RuntimeError", "Traceback", "usage cache"):
+        assert forbidden not in response.text
+
+
+@pytest.mark.parametrize("failing_source", sorted(LOADER_PATCH_TARGETS))
+def test_any_single_raising_loader_leaves_the_other_three_readable(
+    client: TestClient,
+    cache_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failing_source: str,
+) -> None:
+    target, expected_surface, expected_kind = LOADER_PATCH_TARGETS[failing_source]
+    write_all_caches(cache_paths)
+    monkeypatch.setattr(target, _raising_loader)
+
+    response = client.get("/api/usage-allowances")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert len(payload["allowances"]) == 3
+    assert all(bucket["windows"] for bucket in payload["allowances"])
+    assert payload["unavailable"] == [
+        {
+            "provider": "anthropic" if expected_surface.startswith("claude") else "openai",
+            "product_surface": expected_surface,
+            "status": "invalid_cache",
+            "source_kind": expected_kind,
+        }
+    ]
+    assert SECRET_MARKER not in response.text
+
+
+def test_every_loader_raising_still_answers_without_error_text(
+    client: TestClient, cache_paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_all_caches(cache_paths)
+    for target, _surface, _kind in LOADER_PATCH_TARGETS.values():
+        monkeypatch.setattr(target, _raising_loader)
+
+    response = client.get("/api/usage-allowances")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["allowances"] == []
+    assert len(payload["unavailable"]) == 4
+    assert {entry["status"] for entry in payload["unavailable"]} == {"invalid_cache"}
+    for forbidden in (SECRET_MARKER, "RuntimeError", "Traceback"):
+        assert forbidden not in response.text
+
+
+def test_the_guard_does_not_swallow_a_bug_in_our_own_projection(
+    client: TestClient, cache_paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The boundary is around the loader call only.
+
+    A failure in the projection is our bug, not a source failure, and must
+    still surface — otherwise this endpoint would quietly report four
+    unreadable sources whenever its own code was broken.
+    """
+    write_all_caches(cache_paths)
+
+    def explode(**kwargs):
+        raise RuntimeError("projection bug must not be reported as an unreadable source")
+
+    monkeypatch.setattr("app.main.build_usage_allowance_payload", explode)
+
+    with pytest.raises(RuntimeError):
+        client.get("/api/usage-allowances")
+
+
+def test_sanitized_unavailable_snapshot_is_built_from_nothing() -> None:
+    snapshot = usage_allowance.sanitized_unavailable_snapshot()
+
+    assert snapshot == {
+        "available": False,
+        "stale": False,
+        "status": "invalid_cache",
+        "observed_at": None,
+        "source": None,
+        "error_message": None,
+    }
+    # Reuses the existing cache vocabulary rather than adding a status.
+    assert snapshot["status"] == codex_rate_limits_cache.STATUS_INVALID_CACHE
+    # It takes no arguments, so no failure detail can be threaded into it.
+    assert inspect.signature(usage_allowance.sanitized_unavailable_snapshot).parameters == {}
 
 
 # ---------------------------------------------------------------------------

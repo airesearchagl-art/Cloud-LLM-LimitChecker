@@ -138,6 +138,32 @@ CLAUDE_DESKTOP_CLOUD_PROJECTION = CacheProjection(
 )
 
 
+#: Status for a source that could not be read at all. Reuses the existing
+#: cache vocabulary instead of inventing a parallel one: to a consumer, a
+#: loader that blew up is indistinguishable from a cache that could not be
+#: read, and both mean "this source has nothing trustworthy to show".
+UNREADABLE_SOURCE_STATUS = "invalid_cache"
+
+
+def sanitized_unavailable_snapshot() -> dict:
+    """A fixed, content-free snapshot for a source that could not be read.
+
+    Takes no arguments on purpose. Whatever went wrong, none of it — no
+    exception message, no file path, no cache content, no traceback, no
+    environment — can reach the response through this value, because none of
+    it is an input. A caller that catches a failing loader substitutes this,
+    so one broken source costs that source and not the whole aggregate.
+    """
+    return {
+        "available": False,
+        "stale": False,
+        "status": UNREADABLE_SOURCE_STATUS,
+        "observed_at": None,
+        "source": None,
+        "error_message": None,
+    }
+
+
 def project_window(window: dict | None, *, source_slot: str | None) -> dict | None:
     """Project one validated cache window onto a generic allowance window.
 
