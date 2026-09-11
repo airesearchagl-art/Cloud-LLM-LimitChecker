@@ -87,7 +87,8 @@ def test_rate_limits_read_request_shape():
     rl_request = sent[2]
     assert rl_request["method"] == "account/rateLimits/read"
     assert rl_request["id"] == 2
-    assert rl_request["params"] == {}
+    # The method takes no params: the official form omits the key entirely.
+    assert "params" not in rl_request
 
 
 # ---------------------------------------------------------------------------
@@ -307,16 +308,20 @@ def test_empty_credits_list_does_not_crash():
 
 
 # ---------------------------------------------------------------------------
-# 18: rateLimitsByLimitIdを無視
+# 18: rateLimitsByLimitIdはcanonical bucketsになり、legacy windowsは不変
 # ---------------------------------------------------------------------------
 
 
-def test_rate_limits_by_limit_id_is_ignored():
+def test_rate_limits_by_limit_id_becomes_the_only_canonical_view():
     send, _ = make_send_recorder()
     recv = make_recv([INIT_OK, rate_limits_response(load_fixture_result("13_rate_limits_by_limit_id_present.json"))])
     result = adapter.run_json_rpc_session(send=send, recv=recv, now=NOW)
     assert result.success is True
+    # legacy view still comes from result.rateLimits
     assert result.windows["five_hour"]["used_percentage"] == 42.0
+    # the map's single entry is the only bucket; rateLimits is not added again
+    assert [bucket["limit_id"] for bucket in result.buckets] == ["fixture-limit"]
+    assert result.buckets[0]["limit_id_origin"] == "map_key"
 
 
 # ---------------------------------------------------------------------------

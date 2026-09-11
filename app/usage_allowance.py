@@ -1,4 +1,4 @@
-"""Generic Usage Allowance read model (Phase 1).
+"""Generic Usage Allowance read model.
 
 Projects the app's EXISTING normalized cache snapshots onto one
 provider-agnostic shape, so a presentation layer can render "allowance
@@ -6,21 +6,21 @@ buckets" without hard-coding a provider, a product surface, a window name,
 or a model name. The domain unit here is an allowance bucket and its
 windows -- never a model. Model names age out; buckets do not.
 
-Phase 1 boundary, deliberately narrow:
+Boundary, deliberately narrow:
 
 - The only inputs are snapshots already produced by the existing cache
   loaders. This module never reads a file, never starts a process, never
   touches the network or the database, and never writes anything.
   `build_usage_allowance_payload` is a pure function of its arguments; the
   route is responsible for loading the snapshots and passing them in.
-- It never sees a raw Codex App Server payload. Everything that API returns
-  beyond the two historical windows -- `rateLimitsByLimitId`, `limitId`,
-  `limitName`, `planType`, `rateLimitReachedType`, `credits`,
-  `rateLimitResetCredits`, spend-control fields -- is absent from every
-  current cache, so those are emitted as `null` here and are NOT claimed as
-  supported. Ingesting them is Phase 2 (adapter/cache) work, and until then
-  no dedupe / limit-id-extraction / bucket-selection logic is carried here
-  as dead code.
+- It never sees a raw Codex App Server payload. A v2 Codex auto-fetch cache
+  carries canonical buckets -- already selected and deduplicated by the
+  adapter (`app.codex_rate_limits_adapter`), with `limit_id`,
+  `limit_id_origin`, `display_name`, `plan_type`, `rate_limit_reached_type`
+  and each window's real source slot -- and each becomes one allowance
+  bucket. A v1 cache has none of that, so it keeps the original projection
+  with those fields `null`. `credits`, `rateLimitResetCredits`, account and
+  spend-control fields are in no cache and are never emitted.
 - Every field is copied one at a time from an explicit allowlist. No source
   dict is ever splatted into the output, so an unknown or future cache field
   can never reach the API by accident.
@@ -92,12 +92,14 @@ class CacheProjection:
     window_key_is_source_slot: bool
 
 
-#: Codex auto-fetch cache. The adapter assigns `five_hour` / `weekly` by
-#: matching `windowDurationMins` (300 / 10080) and discards the App Server's
-#: own `primary` / `secondary` slot, so the cache key is NOT a source slot
-#: here -- `source_slot` stays null rather than claiming a slot the cache no
-#: longer knows. The real duration survives, so the windows remain
-#: distinguishable by `window_duration_minutes`.
+#: Codex auto-fetch cache. Its legacy `five_hour` / `weekly` keys are
+#: assigned by matching `windowDurationMins` (300 / 10080), not by the App
+#: Server's own `primary` / `secondary` slot, so the key is NOT a source slot
+#: -- when a v1 cache is projected through these keys, `source_slot` stays
+#: null rather than claiming a slot the cache does not know. The real
+#: duration survives, so the windows remain distinguishable by
+#: `window_duration_minutes`. A v2 cache is projected from its canonical
+#: buckets instead (see `project_canonical_buckets`).
 CODEX_RATE_LIMITS_PROJECTION = CacheProjection(
     provider=PROVIDER_OPENAI,
     product_surface=PRODUCT_SURFACE_WORK_CODEX,
@@ -226,9 +228,9 @@ def project_cache_snapshot(
     bucket = {
         "provider": projection.provider,
         "product_surface": projection.product_surface,
-        # Not present in any Phase 1 cache. Emitted as null rather than
-        # synthesized, so a consumer can tell "not carried by this source"
-        # apart from a real value. Phase 2 (adapter/cache) fills these in.
+        # Not carried by any cache projected through this path. Emitted as
+        # null rather than synthesized, so a consumer can tell "not carried
+        # by this source" apart from a real value.
         "limit_id": None,
         "limit_id_origin": None,
         "display_name": None,
@@ -245,6 +247,39 @@ def project_cache_snapshot(
         "windows": windows,
     }
     return bucket, None
+
+
+def project_canonical_buckets(snapshot: dict, *, projection: CacheProjection) -> list[dict]:
+    """Project an available snapshot's canonical buckets, one allowance bucket each.
+
+    The buckets were already selected and deduplicated upstream, so every
+    one is emitted and nothing is added: the legacy `five_hour` / `weekly`
+    keys of the same snapshot are deliberately NOT projected as well, since
+    they describe one of these buckets again. Each bucket carries its own
+    freshness `status`; every field is copied from an explicit allowlist.
+    """
+    allowances = []
+    for source_bucket in snapshot["buckets"]:
+        windows = [
+            project_window(window, source_slot=window["source_slot"]) for window in source_bucket["windows"]
+        ]
+        allowances.append(
+            {
+                "provider": projection.provider,
+                "product_surface": projection.product_surface,
+                "limit_id": source_bucket["limit_id"],
+                "limit_id_origin": source_bucket["limit_id_origin"],
+                "display_name": source_bucket["display_name"],
+                "plan_type": source_bucket["plan_type"],
+                "rate_limit_reached_type": source_bucket["rate_limit_reached_type"],
+                "status": source_bucket["status"],
+                "source_kind": projection.source_kind,
+                "provenance": snapshot.get("source"),
+                "observed_at": snapshot.get("observed_at"),
+                "windows": windows,
+            }
+        )
+    return allowances
 
 
 def build_usage_allowance_payload(
@@ -274,6 +309,11 @@ def build_usage_allowance_payload(
         (claude_code, CLAUDE_CODE_PROJECTION),
         (claude_desktop_cloud, CLAUDE_DESKTOP_CLOUD_PROJECTION),
     ):
+        # Only the v2 Codex auto-fetch cache carries canonical buckets; no
+        # other source is ever projected through them.
+        if projection is CODEX_RATE_LIMITS_PROJECTION and snapshot.get("available") and snapshot.get("buckets"):
+            allowances.extend(project_canonical_buckets(snapshot, projection=projection))
+            continue
         bucket, missing = project_cache_snapshot(snapshot, projection=projection)
         if bucket is not None:
             allowances.append(bucket)

@@ -55,10 +55,31 @@ def rl_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         yield client
 
 
+def canonical_buckets(windows: dict) -> list[dict]:
+    """A synthetic single canonical bucket consistent with `windows`, as a
+    successful fetch must now carry (slot assignment here is arbitrary)."""
+    present = [window for window in (windows.get("five_hour"), windows.get("weekly")) if window is not None]
+    return [
+        {
+            "limit_id": None,
+            "limit_id_origin": None,
+            "display_name": None,
+            "plan_type": None,
+            "rate_limit_reached_type": None,
+            "windows": [{"source_slot": slot, **window} for slot, window in zip(("primary", "secondary"), present)],
+        }
+    ]
+
+
 def fake_success(windows: dict):
     def fetch(*, now=None, **kwargs):
         return CodexRateLimitsFetchResult(
-            success=True, windows=windows, error_type=None, user_message=None, collected_at=now
+            success=True,
+            windows=windows,
+            error_type=None,
+            user_message=None,
+            collected_at=now,
+            buckets=canonical_buckets(windows),
         )
 
     return fetch
@@ -236,6 +257,7 @@ def test_concurrent_refresh_is_rejected_while_in_progress(rl_client, monkeypatch
         return CodexRateLimitsFetchResult(
             success=True,
             windows={"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW},
+            buckets=canonical_buckets({"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW}),
             error_type=None,
             user_message=None,
             collected_at=now,
