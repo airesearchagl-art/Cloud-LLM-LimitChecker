@@ -2,7 +2,7 @@ import os
 import asyncio
 import base64
 import secrets
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -81,6 +81,7 @@ from app.github_rate_limit_state import (
 )
 from app.seed import seed_from_yaml
 from app.time_utils import app_tz
+from app.usage_allowance import build_usage_allowance_payload, sanitized_unavailable_snapshot
 from app.safety import (
     CollectorDailyLimitExceededError,
     UnknownCollectorVendorError,
@@ -971,6 +972,54 @@ def refresh_codex_rate_limits() -> dict:
             },
         ) from exc
     return _codex_rate_limits_response(_current_utc_time())
+
+
+def _safe_load_usage_snapshot(load_snapshot: Callable[..., dict], *, now: datetime) -> dict:
+    """Load one cache for the aggregate read model, absorbing a raising loader.
+
+    Every loader already turns a missing or malformed cache into a status
+    rather than an exception, but each can still raise *before* reaching its
+    own try block — resolving the cache path is outside it, for one. On a
+    per-provider GET that is one endpoint failing for its own source. Here
+    four sources share a single response, so an unguarded raise would take the
+    other three down with it and break this endpoint's contract that one
+    broken source costs only that source.
+
+    The boundary is deliberately narrow: it wraps the loader call and nothing
+    else. A failure inside the projection that follows is a bug in our own
+    code, not a source failure, and must keep surfacing rather than be quietly
+    relabelled as an unreadable source. The substituted snapshot is built from
+    no part of the exception, so nothing about the failure reaches the wire.
+    """
+    try:
+        return load_snapshot(now=now)
+    except Exception:
+        return sanitized_unavailable_snapshot()
+
+
+@app.get("/api/usage-allowances", response_model=schemas.UsageAllowanceResponse)
+def get_usage_allowances() -> dict:
+    """Provider-agnostic read model over the existing local usage caches.
+
+    No outbound I/O, no subprocess, no database, no write — but not "no I/O":
+    this reads the same local cache files the per-provider GETs above already
+    read, using their own loaders, and then hands the resulting snapshots to a
+    pure projection. It never starts Codex App Server, never triggers a
+    refresh, and never re-reads a raw vendor payload.
+
+    Adding a provider here must not change any existing endpoint: this route
+    is additive and the per-provider GETs stay the compatibility surface.
+    """
+    now = _current_utc_time()
+    return build_usage_allowance_payload(
+        generated_at=now,
+        codex_rate_limits=_safe_load_usage_snapshot(codex_rate_limits_cache.load_snapshot, now=now),
+        codex_manual=_safe_load_usage_snapshot(codex_usage_cache.load_snapshot, now=now),
+        claude_code=_safe_load_usage_snapshot(load_claude_code_usage_snapshot, now=now),
+        claude_desktop_cloud=_safe_load_usage_snapshot(
+            claude_desktop_cloud_usage_cache.load_snapshot, now=now
+        ),
+    )
 
 
 @app.get("/compact", include_in_schema=False)

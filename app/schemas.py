@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -427,3 +428,130 @@ class CollectorPreflightStatusRead(BaseModel):
     notes: list[str]
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Generic Usage Allowance read model
+#
+# Provider-agnostic view over the per-provider snapshots above. The unit is an
+# allowance bucket and its windows, never a model name, so a new model or a
+# renamed plan cannot invalidate the contract. See app/usage_allowance.py.
+# ---------------------------------------------------------------------------
+
+
+def _reject_bool(value: object) -> object:
+    """Reject bool before pydantic coerces it.
+
+    `bool` is a subclass of `int`, so `True` would otherwise silently become
+    `1.0` percent or a 1-minute window.
+    """
+    if isinstance(value, bool):
+        raise ValueError("must not be a boolean")
+    return value
+
+
+class UsageAllowanceWindow(BaseModel):
+    """One rolling allowance window inside a bucket.
+
+    Only `used_percent` is required. A source may legitimately report a
+    used percentage without a window duration or without a reset time, and
+    dropping such a window would silently discard information the source
+    did provide — so both are nullable here. Percentages are plain numbers,
+    not any one vendor's integer width: a vendor-specific wire type must not
+    leak into the generic contract.
+    """
+
+    source_slot: str | None = None
+    window_duration_minutes: int | None = None
+    used_percent: float
+    remaining_percent: float | None = None
+    resets_at: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("window_duration_minutes", "used_percent", "remaining_percent", mode="before")
+    @classmethod
+    def _no_booleans(cls, value: object) -> object:
+        return _reject_bool(value)
+
+    @field_validator("used_percent", "remaining_percent")
+    @classmethod
+    def _finite_percentage_in_range(cls, value: float | None) -> float | None:
+        if value is None:
+            return value
+        if not math.isfinite(value):
+            raise ValueError("percentage must be a finite number")
+        if not 0.0 <= value <= 100.0:
+            raise ValueError("percentage must be between 0 and 100")
+        return value
+
+
+class UsageAllowanceBucket(BaseModel):
+    """One allowance bucket for one product surface of one provider.
+
+    `provider`, `product_surface`, `plan_type`, `rate_limit_reached_type` and
+    `source_kind` are open strings with a known display mapping, never closed
+    enums: a new surface or a new plan must be representable without a schema
+    change. `rate_limit_reached_type` stays bucket-level — the sources that
+    carry it say which bucket was reached, never which window, so it is never
+    lowered onto a window as a `reached` flag.
+
+    Fields a source does not carry are null. They are never estimated, and
+    never filled from another source or an older observation.
+
+    No field or combination of fields is a unique key. Two buckets may share
+    the same `(provider, product_surface)` — the same surface observed by a
+    different source, for example an auto-fetched and a manually entered
+    reading of one allowance — and they may disagree. A consumer must not key
+    off this shape; a stable identity needs source-provided bucket ids, which
+    arrive with the persistence work, not here.
+    """
+
+    provider: str
+    product_surface: str
+    limit_id: str | None = None
+    limit_id_origin: str | None = None
+    display_name: str | None = None
+    plan_type: str | None = None
+    rate_limit_reached_type: str | None = None
+    # Reuses the existing cache vocabulary: ok | stale | not_observed | invalid_cache.
+    status: str
+    source_kind: str
+    provenance: str | None = None
+    observed_at: str | None = None
+    windows: list[UsageAllowanceWindow] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UnavailableUsageAllowance(BaseModel):
+    """A source that exists but currently has nothing to show.
+
+    Unavailability is its own axis, not a `source_kind` value: the source
+    kind is still known here, only the data is missing. Listing it
+    explicitly keeps "no data" visible instead of letting a surface quietly
+    disappear from the response.
+    """
+
+    provider: str
+    product_surface: str
+    status: str
+    source_kind: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UsageAllowanceResponse(BaseModel):
+    """Every allowance bucket currently readable, plus the sources that
+    currently have nothing to show."""
+
+    # `extra="forbid"` on this and every model above is load-bearing: it turns
+    # an accidental passthrough of a raw source field into a hard failure
+    # rather than a silent data leak onto a public surface.
+
+    #: When this projection ran — distinct from each bucket's `observed_at`.
+    generated_at: str
+    allowances: list[UsageAllowanceBucket] = Field(default_factory=list)
+    unavailable: list[UnavailableUsageAllowance] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
