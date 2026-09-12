@@ -19,6 +19,8 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from app.desktop.lifecycle import DesktopStartupError
+
 #: Same directory name the existing cache modules already use, so a desktop
 #: install keeps all of this app's local state in one place.
 APP_DIR_NAME = "Cloud-LLM-LimitChecker"
@@ -27,6 +29,10 @@ DATABASE_URL_ENV_VAR = "APP_DB_URL"
 DATABASE_FILE_NAME = "limit_checker.db"
 DOTENV_FILE_NAME = ".env"
 LOG_FILE_NAME = "desktop.log"
+
+#: Shown verbatim in the failure dialog: no path, no OS message. The errno
+#: and strerror behind it go to the log instead.
+APP_DATA_DIR_ERROR = "Desktop application data directory could not be prepared."
 
 
 def is_frozen() -> bool:
@@ -63,6 +69,31 @@ def executable_dir(frozen: bool | None = None) -> Path:
 def resource_dir() -> Path:
     """Root that holds `static/`, matching `app.main.STATIC_DIR` in both modes."""
     return Path(__file__).resolve().parent.parent.parent
+
+
+def ensure_app_data_dir(env: Mapping[str, str] | None = None, *, mkdir=None) -> Path:
+    """Create the per-user app-data directory, or fail fast with sanitized text.
+
+    Only the packaged default database needs this: SQLite will not create a
+    missing parent directory, and finding out at `create_all` time surfaces
+    as a dead backend thread rather than an explainable startup error.
+    Creating it here also removes the accident that made it work so far --
+    the log file happening to be opened first.
+    """
+    target = app_data_dir(env)
+    maker = mkdir if mkdir is not None else (lambda path: path.mkdir(parents=True, exist_ok=True))
+    try:
+        maker(target)
+    except OSError as error:
+        # Split deliberately: the dialog gets a constant sentence, while the
+        # part that actually explains the failure goes to the log. Without
+        # this the user would be told something went wrong and nothing else.
+        print(
+            f"app data directory could not be created (errno {error.errno}: {error.strerror})",
+            file=sys.stderr,
+        )
+        raise DesktopStartupError(APP_DATA_DIR_ERROR) from None
+    return target
 
 
 def desktop_log_path(env: Mapping[str, str] | None = None) -> Path:
@@ -117,6 +148,7 @@ def configure_environment(
     frozen: bool | None = None,
     dotenv_loader=None,
     chdir=None,
+    mkdir=None,
 ) -> dict[str, object]:
     """Prepare process environment before `app.main` is imported.
 
@@ -138,6 +170,9 @@ def configure_environment(
 
     database_url = resolve_database_url(environ, frozen=frozen)
     if database_url is not None:
+        # Only when *we* chose the app-data default. An explicitly configured
+        # APP_DB_URL is someone else's path: preserve it and create nothing.
+        ensure_app_data_dir(environ, mkdir=mkdir)
         environ[DATABASE_URL_ENV_VAR] = database_url
 
     # A packaged launch inherits whatever directory the shortcut was invoked

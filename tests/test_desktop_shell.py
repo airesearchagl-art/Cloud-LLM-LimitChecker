@@ -578,6 +578,157 @@ def test_a_backend_that_will_not_stop_is_reported_not_swallowed():
 
 
 # ---------------------------------------------------------------------------
+# App-data directory: created for the packaged default database only
+# ---------------------------------------------------------------------------
+
+
+def test_packaged_default_database_directory_is_created_without_opening_a_log(tmp_path):
+    # SQLite will not create a missing parent, and nothing here opens the log
+    # file -- the directory must exist purely because the environment
+    # preparation created it.
+    env = {"LOCALAPPDATA": str(tmp_path / "missing")}
+    app_data = paths.app_data_dir(env)
+    assert not app_data.exists()
+
+    paths.configure_environment(
+        env, frozen=True, dotenv_loader=lambda **kwargs: None, chdir=lambda _path: None
+    )
+
+    assert app_data.is_dir()
+    assert env["APP_DB_URL"] == paths.default_database_url(env)
+    assert not (app_data / paths.LOG_FILE_NAME).exists()
+
+
+def test_sqlite_can_open_the_prepared_packaged_database(tmp_path):
+    import sqlite3
+
+    env = {"LOCALAPPDATA": str(tmp_path / "missing")}
+    paths.configure_environment(
+        env, frozen=True, dotenv_loader=lambda **kwargs: None, chdir=lambda _path: None
+    )
+
+    # The whole point of the directory: this is what app.database does next.
+    database_file = paths.app_data_dir(env) / paths.DATABASE_FILE_NAME
+    sqlite3.connect(database_file).close()
+
+    assert database_file.exists()
+
+
+def test_preset_database_url_creates_no_directory(tmp_path):
+    env = {"LOCALAPPDATA": str(tmp_path / "missing"), "APP_DB_URL": "sqlite:///./existing.db"}
+
+    paths.configure_environment(
+        env, frozen=True, dotenv_loader=lambda **kwargs: None, chdir=lambda _path: None
+    )
+
+    assert env["APP_DB_URL"] == "sqlite:///./existing.db"
+    assert not paths.app_data_dir(env).exists()
+
+
+def test_source_run_creates_no_directory_and_sets_no_database_url(tmp_path):
+    env = {"LOCALAPPDATA": str(tmp_path / "missing")}
+    made: list[Path] = []
+
+    summary = paths.configure_environment(
+        env,
+        frozen=False,
+        dotenv_loader=lambda **kwargs: None,
+        chdir=lambda _path: None,
+        mkdir=made.append,
+    )
+
+    assert made == []
+    assert "APP_DB_URL" not in env
+    assert summary["database_url_source"] == "preexisting"
+    assert not paths.app_data_dir(env).exists()
+
+
+def test_unpreparable_app_data_directory_fails_fast_without_leaking_paths(tmp_path):
+    env = {"LOCALAPPDATA": str(tmp_path / "missing")}
+
+    def refuse(path):
+        raise OSError(13, f"Access is denied: {path}")
+
+    with pytest.raises(DesktopStartupError) as failure:
+        paths.configure_environment(
+            env,
+            frozen=True,
+            dotenv_loader=lambda **kwargs: None,
+            chdir=lambda _path: None,
+            mkdir=refuse,
+        )
+
+    message = str(failure.value)
+    assert message == paths.APP_DATA_DIR_ERROR
+    assert str(tmp_path) not in message
+    assert "Access is denied" not in message
+    # Fails before the URL is published, so nothing downstream sees a path
+    # it cannot use.
+    assert "APP_DB_URL" not in env
+
+
+def test_app_data_failure_reason_is_logged_while_the_dialog_stays_generic(tmp_path, capsys):
+    # The dialog must not carry the OS message, but the reason has to survive
+    # somewhere or the user is told "it failed" and nothing more.
+    def refuse(path):
+        raise OSError(13, "Access is denied")
+
+    with pytest.raises(DesktopStartupError) as failure:
+        paths.ensure_app_data_dir({"LOCALAPPDATA": str(tmp_path)}, mkdir=refuse)
+
+    assert str(failure.value) == paths.APP_DATA_DIR_ERROR
+    logged = capsys.readouterr().err
+    assert "errno 13" in logged
+    assert "Access is denied" in logged
+
+
+def test_dialog_points_at_no_log_when_none_is_being_written(tmp_path):
+    shown: list[str] = []
+
+    desktop_main.report_fatal_error(
+        paths.APP_DATA_DIR_ERROR,
+        log_path=None,
+        message_box=lambda handle, text, title, flags: shown.append(text),
+    )
+
+    assert shown == [paths.APP_DATA_DIR_ERROR]
+    assert "Details" not in shown[0]
+    assert str(tmp_path) not in shown[0]
+
+
+def test_null_sink_is_never_advertised_as_a_log_file(tmp_path, monkeypatch):
+    # %LOCALAPPDATA% unwritable: the streams still work, but there is no file
+    # to send anyone to.
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    used = desktop_main.ensure_std_streams(
+        log_path=tmp_path / "desktop.log",
+        opener=lambda path: open(os.devnull, "w", encoding="utf-8"),
+    )
+
+    assert used is None
+    assert sys.stdout is not None
+    sys.stdout.close()
+
+
+def test_main_reports_environment_preparation_failure_before_starting_a_backend(monkeypatch):
+    started: list[int] = []
+    reported: list[str] = []
+
+    def refuse():
+        raise DesktopStartupError(paths.APP_DATA_DIR_ERROR)
+
+    monkeypatch.setattr(desktop_main.paths, "configure_environment", refuse)
+    monkeypatch.setattr(desktop_main, "prepare_backend", lambda port: started.append(port))
+    monkeypatch.setattr(desktop_main, "report_fatal_error", lambda message, **kwargs: reported.append(message))
+
+    assert desktop_main.main([]) == 1
+    assert started == []
+    assert reported == [paths.APP_DATA_DIR_ERROR]
+
+
+# ---------------------------------------------------------------------------
 # The dashboard must be usable before a window appears
 # ---------------------------------------------------------------------------
 

@@ -79,6 +79,8 @@ healthだけでは判定しません。ブラウザ用に `start_dashboard.bat` 
 
 packaged版で既存の履歴を使いたい場合は、`APP_DB_URL` に明示指定してください（例：`APP_DB_URL=sqlite:///C:/path/to/limit_checker.db`）。既存DBを勝手に読み込んだりコピーしたりはしません。
 
+3のとき（packagedで未指定）だけ、launcherがapp-dataディレクトリを `mkdir(parents=True, exist_ok=True)` で作成してから `APP_DB_URL` を設定します。SQLiteは親ディレクトリを作らないため、これが無いと起動時のテーブル作成が失敗します。作成できない場合はbackendを起動せず、`Desktop application data directory could not be prepared.` とだけ表示して終了します。OSのエラー内容（errno / strerror）はログにのみ記録し、画面には出しません。ダイアログにログファイルのパスを併記するのは、実際にログを書き込めている場合だけです（ログ自体が開けずnullへfallbackしたときは併記しません）。1・2のケースでは、他者のパスを推測してディレクトリを作ることはありません。
+
 ## .env
 
 - `.env` は**bundleしません**。

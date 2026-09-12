@@ -81,6 +81,10 @@ def ensure_std_streams(*, log_path: Path | None = None, opener=_open_log_stream)
     except OSError:
         stream = open(os.devnull, "w", encoding="utf-8")
         target = None
+    if getattr(stream, "name", None) == os.devnull:
+        # The opener degraded to a null sink. Returning the path anyway would
+        # make the failure dialog point at a log file that does not exist.
+        target = None
     if sys.stdout is None:
         sys.stdout = stream
     if sys.stderr is None:
@@ -91,8 +95,10 @@ def ensure_std_streams(*, log_path: Path | None = None, opener=_open_log_stream)
 def report_fatal_error(message: str, *, log_path: Path | None = None, message_box=None) -> None:
     """Make a startup failure visible even when there is no console.
 
-    The message is the adapter's own generic text -- never a path, an
-    environment value, or a credential.
+    The message is the adapter's own generic text -- never an environment
+    value, a credential, or an OS error string. The log path is appended
+    only when a log is actually being written, so the dialog never sends the
+    user looking for a file that does not exist.
     """
     print(f"Cloud LLM Limit Checker could not start: {message}", file=sys.stderr)
     if log_path is not None:
