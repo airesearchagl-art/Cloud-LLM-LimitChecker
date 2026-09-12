@@ -50,10 +50,31 @@ WEEKLY_WINDOW = {
 }
 
 
+def canonical_buckets(windows: dict) -> list[dict]:
+    """A synthetic single canonical bucket consistent with `windows`, as a
+    successful fetch must now carry (slot assignment here is arbitrary)."""
+    present = [window for window in (windows.get("five_hour"), windows.get("weekly")) if window is not None]
+    return [
+        {
+            "limit_id": None,
+            "limit_id_origin": None,
+            "display_name": None,
+            "plan_type": None,
+            "rate_limit_reached_type": None,
+            "windows": [{"source_slot": slot, **window} for slot, window in zip(("primary", "secondary"), present)],
+        }
+    ]
+
+
 def fake_success(windows: dict):
     def fetch(*, now=None, **kwargs):
         return CodexRateLimitsFetchResult(
-            success=True, windows=windows, error_type=None, user_message=None, collected_at=now
+            success=True,
+            windows=windows,
+            error_type=None,
+            user_message=None,
+            collected_at=now,
+            buckets=canonical_buckets(windows),
         )
 
     return fetch
@@ -299,6 +320,7 @@ def test_attempt_calls_the_one_shot_adapter_via_controller(tmp_path):
             return CodexRateLimitsFetchResult(
                 success=True,
                 windows={"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW},
+                buckets=canonical_buckets({"five_hour": FIVE_HOUR_WINDOW, "weekly": WEEKLY_WINDOW}),
                 error_type=None,
                 user_message=None,
                 collected_at=now,
@@ -451,6 +473,7 @@ def test_run_loop_continues_after_exception(tmp_path):
             return CodexRateLimitsFetchResult(
                 success=True,
                 windows={"five_hour": FIVE_HOUR_WINDOW, "weekly": None},
+                buckets=canonical_buckets({"five_hour": FIVE_HOUR_WINDOW, "weekly": None}),
                 error_type=None,
                 user_message=None,
                 collected_at=now,
@@ -495,6 +518,7 @@ def test_run_loop_continues_after_timeout_style_failure(tmp_path):
             return CodexRateLimitsFetchResult(
                 success=True,
                 windows={"five_hour": FIVE_HOUR_WINDOW, "weekly": None},
+                buckets=canonical_buckets({"five_hour": FIVE_HOUR_WINDOW, "weekly": None}),
                 error_type=None,
                 user_message=None,
                 collected_at=now,
@@ -540,6 +564,7 @@ def test_at_most_one_attempt_per_cycle(tmp_path):
             return CodexRateLimitsFetchResult(
                 success=True,
                 windows={"five_hour": FIVE_HOUR_WINDOW, "weekly": None},
+                buckets=canonical_buckets({"five_hour": FIVE_HOUR_WINDOW, "weekly": None}),
                 error_type=None,
                 user_message=None,
                 collected_at=now,

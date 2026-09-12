@@ -5,16 +5,15 @@ Two layers are tested separately and are never conflated:
 - Generic SCHEMA tests, which pin what the contract is able to represent
   (for example a window with no duration and no reset time). These say
   nothing about whether any current cache can carry such a window.
-- Current CACHE PROJECTION tests, which pin what today's caches actually
-  produce. Everything the Codex App Server returns beyond the two historical
-  windows is absent from every cache, so those fields must project as null
-  and must not be dressed up as supported.
+- CACHE PROJECTION tests, which pin what the caches actually produce. The
+  Codex auto-fetch record here is a v1 cache: it carries only the two
+  historical windows, so everything else the Codex App Server returns must
+  project as null and must not be dressed up as supported.
 
-Deliberately NOT covered here, and handed to Phase 2 with the adapter/cache
-work that would make them real: `rateLimitsByLimitId` ingestion, the
-`rateLimits` vs `rateLimitsByLimitId` bucket-selection/dedupe rule, and
-`limitId` / `limitName` / `planType` / `rateLimitReachedType` extraction.
-No dead code for any of those exists yet, so there is nothing to assert.
+The v2 multi-bucket path (`rateLimitsByLimitId` ingestion, the `rateLimits`
+vs `rateLimitsByLimitId` selection/dedupe rule, and `limitId` / `limitName` /
+`planType` / `rateLimitReachedType` extraction) is covered in
+`tests/test_codex_rate_limits_multibucket.py`.
 """
 
 import ast
@@ -60,8 +59,9 @@ def _percent_window(used: float, resets_at: datetime, *, duration: int | None = 
 
 
 def codex_rate_limits_record(observed_at: datetime = NOW) -> dict:
+    """A v1 Codex auto-fetch cache (legacy windows only, no canonical buckets)."""
     return {
-        "schema_version": codex_rate_limits_cache.SCHEMA_VERSION,
+        "schema_version": codex_rate_limits_cache.LEGACY_SCHEMA_VERSION,
         "source": codex_rate_limits_cache.SOURCE_NAME,
         "observed_at": observed_at.isoformat(),
         "five_hour": _percent_window(42.0, NOW + timedelta(hours=3), duration=300),

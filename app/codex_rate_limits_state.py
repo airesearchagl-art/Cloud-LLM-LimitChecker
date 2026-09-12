@@ -123,6 +123,9 @@ class CodexRateLimitsController:
                 "observed_at": now.isoformat(),
                 "five_hour": result.windows.get("five_hour"),
                 "weekly": result.windows.get("weekly"),
+                # Required by the v2 schema: a success without canonical
+                # buckets fails validation below and is never written.
+                "buckets": result.buckets,
             }
             try:
                 validated = validate_cache_record(record, now=now)
