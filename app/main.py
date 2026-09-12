@@ -5,6 +5,7 @@ import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -93,6 +94,27 @@ from app.safety import (
 )
 
 
+#: Static assets, resolved from this file rather than the process working
+#: directory. The dashboard has to load identically whether the app is run
+#: with `uvicorn app.main:app` from the repository root or from a packaged
+#: desktop executable, where the working directory is wherever the user
+#: launched it. One code path and no packaging-specific branch here: a
+#: packaged build preserves this same relative layout (the bundled `static/`
+#: sits one level above this module), so the expression holds in both.
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+#: Identity of this application, for a desktop shell deciding whether an
+#: already-listening port belongs to this app or to something else entirely.
+#: Deliberately content-free: no version, no path, no account, no credential.
+DESKTOP_APP_NAME = "Cloud-LLM-LimitChecker"
+DESKTOP_PROTOCOL_VERSION = 1
+
+#: Endpoints a desktop shell must be able to reach before a window exists.
+#: Same narrow exemption as the health check: both are constant, read-only
+#: and carry nothing about the account or the machine.
+_DESKTOP_PREFLIGHT_PATHS = ("/api/health", "/api/desktop/identity")
+
+
 def is_seed_api_enabled() -> bool:
     return os.getenv("ENABLE_SEED_API", "false").strip().lower() == "true"
 
@@ -128,7 +150,7 @@ def is_authorized_basic_header(header_value: str | None) -> bool:
 
 class OptionalBasicAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/api/health":
+        if request.url.path in _DESKTOP_PREFLIGHT_PATHS:
             return await call_next(request)
         if not is_basic_auth_enabled():
             return await call_next(request)
@@ -242,6 +264,19 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/desktop/identity")
+def desktop_identity() -> dict[str, object]:
+    """Constant identity handshake for the desktop shell.
+
+    A port answering `/api/health` proves only that *something* is there.
+    The shell attaches to an already-running instance only when this exact
+    payload comes back, and refuses to open a window over a foreign service
+    otherwise. The response is fixed at build time and never reflects the
+    request, the environment, or any stored data.
+    """
+    return {"app": DESKTOP_APP_NAME, "desktop_protocol": DESKTOP_PROTOCOL_VERSION}
 
 
 @app.post("/api/seed")
@@ -1025,7 +1060,7 @@ def get_usage_allowances() -> dict:
 @app.get("/compact", include_in_schema=False)
 def compact_dashboard() -> FileResponse:
     """Read-only compact dashboard. Serves static HTML only, never triggers a fetch."""
-    return FileResponse("static/compact.html")
+    return FileResponse(STATIC_DIR / "compact.html")
 
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

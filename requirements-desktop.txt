@@ -1,0 +1,7 @@
+# Desktop shell runtime dependencies.
+#
+# Kept out of requirements.txt on purpose: the FastAPI backend must stay
+# installable and testable without any GUI dependency (CI installs only
+# requirements.txt).
+-r requirements.txt
+pywebview==6.2.1
