@@ -1,0 +1,6 @@
+# Windows packaging (build-time only) dependencies.
+#
+# Never installed by the app or by CI test runs: PyInstaller is only needed
+# on the machine that produces the desktop executable.
+-r requirements-desktop.txt
+pyinstaller==6.22.2
