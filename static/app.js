@@ -392,6 +392,387 @@ function githubActionsBillingStatusClass(status) {
 // null/undefinedは"—"(未取得の"未取得"表記とは区別し、"exact値が原理的に無い"ことを示す)。
 const fmtExactOrDash = (value) => (value === null || value === undefined ? "—" : fmtNumber(value));
 
+// ============================================================================
+// 使用枠(Usage Allowances)読み取り専用ビュー — 概要(#overviewView) / 上限(#limitsAllowanceView)
+//
+// GET /api/usage-allowancesは既存キャッシュを横断するprovider非依存の読み取り
+// 専用read model(app/usage_allowance.py)であり、非throwのfetchAllowancesSafe()
+// (non-2xx/JSON parse失敗/network errorのいずれも例外を投げず{ok:false}を返す)
+// 経由でのみ呼び、loadAll()の他のPromise.all要素を巻き込んで全滅させない。
+// ============================================================================
+
+async function fetchAllowancesSafe() {
+  try {
+    const res = await fetch("/api/usage-allowances");
+    if (!res.ok) return { ok: false };
+    const data = await res.json();
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false };
+  }
+}
+
+const USAGE_ALLOWANCE_ERROR_MESSAGE = "使用枠情報を取得できませんでした。";
+
+// DOMに触れない純粋関数: source_kind(open string、既知5種)を日本語ラベルへ
+// 変換する。未知の値(nullを含む)は生の値をそのまま単独露出させず、
+// nullは中立な「不明」、それ以外の未知文字列は生の文字列自体を返す
+// (呼び出し側でescapeHtmlする — ここでは二重エスケープを避けるため
+// 何もエスケープしない)。新しいsource_kind値をここで勝手に作らない。
+const USAGE_ALLOWANCE_SOURCE_KIND_LABELS = {
+  OFFICIAL_API: "公式API",
+  OFFICIAL_LOCAL_RUNTIME: "公式ローカル取得",
+  LOCAL_OBSERVATION: "ローカル観測",
+  MANUAL: "手動入力",
+  TEMPORAL_CORRELATION: "時間相関推定",
+};
+
+function usageAllowanceSourceKindLabel(sourceKind) {
+  if (sourceKind === null || sourceKind === undefined) return "不明";
+  return USAGE_ALLOWANCE_SOURCE_KIND_LABELS[sourceKind] || String(sourceKind);
+}
+
+function usageAllowanceSourceBadgeHtml(sourceKind) {
+  return `<span class="source-badge">${escapeHtml(usageAllowanceSourceKindLabel(sourceKind))}</span>`;
+}
+
+// DOMに触れない純粋関数: window_duration_minutesだけからwindowラベルを作る。
+// モデル名・plan名を一切参照しない(spec: 「Never label a window with a model
+// or plan name」)。300/10080以外の整数はfmtNumberで千区切りしたうえで
+// `${n}分枠`にfallbackする。
+function usageAllowanceWindowLabel(windowDurationMinutes) {
+  if (windowDurationMinutes === 300) return "5時間枠";
+  if (windowDurationMinutes === 10080) return "週次枠";
+  if (windowDurationMinutes === null || windowDurationMinutes === undefined) return "期間不明";
+  return `${fmtNumber(windowDurationMinutes)}分枠`;
+}
+
+// DOMに触れない純粋関数: bucketの表示名。display_name -> limit_id ->
+// product_surfaceそのものの順でfallbackする。存在しない名前を作らない
+// (spec: 「Never fabricate a name」)。
+function usageAllowanceBucketTitle(bucket) {
+  if (bucket.display_name) return bucket.display_name;
+  if (bucket.limit_id) return bucket.limit_id;
+  return bucket.product_surface;
+}
+
+// ダッシュボードのstatus_for_usage(app/calculations.py)が使うデフォルト閾値
+// (Limit.warning_threshold=70.0 / critical_threshold=85.0)をそのまま流用する。
+// 使用枠のwindowにはバックエンド由来の正常/注意/危険という文字列が無く
+// used_percentしか渡されないため、既存のstatusClass/meterClassをそのまま
+// 再利用する(spec指示)には、ここで同じ規約の閾値から合成するのが最も
+// 新しい基準を作らない選択となる。
+const USAGE_ALLOWANCE_WARNING_THRESHOLD = 70;
+const USAGE_ALLOWANCE_CRITICAL_THRESHOLD = 85;
+
+// 100%以上でも「上限到達」とは言わない: 到達したかどうかはpayload自身が
+// rate_limit_reached_typeという別のフィールドで(bucket単位で)表現しており、
+// used_percentの丸め(99.6 -> 100)から到達を断定すると出所のない主張になる。
+// ここで作るのはあくまで使用率の読み方(注意/危険)であり、状態の宣言ではない。
+function usageAllowanceWindowStatus(usedPercent) {
+  const percent = typeof usedPercent === "number" && Number.isFinite(usedPercent) ? usedPercent : 0;
+  if (percent >= USAGE_ALLOWANCE_CRITICAL_THRESHOLD) return "危険";
+  if (percent >= USAGE_ALLOWANCE_WARNING_THRESHOLD) return "注意";
+  return "正常";
+}
+
+// DOMに触れない純粋関数: resets_atがnullなら絶対表記("未設定")のみを返し、
+// 未来を推測したカウントダウンは出さない(spec: 「never guess」)。staleな
+// bucketではsuppressCountdownIfStaleで将来カウントダウンだけを抑制する。
+function usageAllowanceWindowResetText(resetsAt, stale) {
+  const absoluteText = fmtDate(resetsAt);
+  if (!resetsAt) return absoluteText;
+  const target = new Date(resetsAt);
+  // 解釈できない値を絶対表記としてそのまま出すと"Invalid Date"が画面に出る。
+  // 読めない時刻は「無い」のと同じ扱いにする(推測もしない)。
+  if (Number.isNaN(target.getTime())) return fmtDate(null);
+  const secondsUntilReset = (target.getTime() - Date.now()) / 1000;
+  const relativeText = suppressCountdownIfStale(fmtSecondsUntilReset(secondsUntilReset), stale);
+  return fmtAbsoluteWithRelative(absoluteText, relativeText);
+}
+
+function usageAllowanceWindowHtml(window, stale) {
+  const label = usageAllowanceWindowLabel(window.window_duration_minutes);
+  const status = usageAllowanceWindowStatus(window.used_percent);
+  const width = Math.min(Math.max(window.used_percent ?? 0, 0), 100);
+  const remainingText = fmtExactOrDash(window.remaining_percent);
+  const resetText = usageAllowanceWindowResetText(window.resets_at, stale);
+  const sourceSlotHtml = window.source_slot
+    ? `<span class="muted usage-allowance-window-slot">${escapeHtml(window.source_slot)}</span>`
+    : "";
+  return `
+    <div class="usage-allowance-window">
+      <div class="usage-allowance-window-head">
+        <span>${escapeHtml(label)}</span>
+        ${sourceSlotHtml}
+      </div>
+      <div class="meter" aria-label="使用率">
+        <div class="${meterClass(status)}" style="width:${width}%"></div>
+      </div>
+      <div class="metric-line">
+        <span class="status ${statusClass(status)}">${escapeHtml(status)}</span>
+        <strong>${fmtNumber(window.used_percent)}%</strong>
+      </div>
+      <div class="metric-line">
+        <span>残り</span>
+        <strong>${remainingText === "—" ? "—" : `${escapeHtml(remainingText)}%`}</strong>
+      </div>
+      <div class="metric-line">
+        <span>reset</span>
+        <strong>${escapeHtml(resetText)}</strong>
+      </div>
+    </div>`;
+}
+
+// DOMに触れない純粋関数: bucket1件ぶんのカードHTML。windowsが空配列の場合は
+// 0%のmeterを描かず、「枠情報なし」というメタ情報だけのカードにする
+// (spec: 「renders as a metadata-only card ... not as 0%」)。
+function usageAllowanceBucketCardHtml(bucket) {
+  const stale = bucket.status === "stale";
+  const title = usageAllowanceBucketTitle(bucket);
+  const badgeHtml = usageAllowanceSourceBadgeHtml(bucket.source_kind);
+  const staleMarkerHtml = stale ? `<span class="status status-warn">最終取得値</span>` : "";
+
+  const metaParts = [];
+  if (bucket.plan_type) metaParts.push(`プラン: ${escapeHtml(bucket.plan_type)}`);
+  if (bucket.rate_limit_reached_type) metaParts.push(`到達種別: ${escapeHtml(bucket.rate_limit_reached_type)}`);
+  metaParts.push(`観測: ${escapeHtml(fmtDate(bucket.observed_at))}`);
+  const metaLineHtml = `<div class="muted usage-allowance-meta">${metaParts.join(" ／ ")}</div>`;
+
+  const windows = Array.isArray(bucket.windows) ? bucket.windows : [];
+  const windowsHtml = windows.length
+    ? windows.map((window) => usageAllowanceWindowHtml(window, stale)).join("")
+    : `<p class="muted">枠情報なし</p>`;
+
+  return `
+    <article class="card usage-allowance-card">
+      <div class="card-title">
+        <h3>${escapeHtml(title)}</h3>
+        <div class="card-title-actions">${badgeHtml}${staleMarkerHtml}</div>
+      </div>
+      ${metaLineHtml}
+      ${windowsHtml}
+    </article>`;
+}
+
+// DOMに触れない純粋関数: unavailableエントリ専用カード。0%/100%にも
+// meterにも決してしない(spec section 5)。
+function usageAllowanceUnavailableCardHtml(item) {
+  const badgeHtml = usageAllowanceSourceBadgeHtml(item.source_kind);
+  const staleMarkerHtml = item.status === "stale" ? `<span class="status status-warn">最終取得値</span>` : "";
+  return `
+    <article class="card usage-allowance-card usage-allowance-unavailable">
+      <div class="card-title">
+        <h3>${escapeHtml(item.provider)} / ${escapeHtml(item.product_surface)}</h3>
+        <div class="card-title-actions">${badgeHtml}${staleMarkerHtml}</div>
+      </div>
+      <p class="status status-pending">取得不能（${escapeHtml(item.status)}）</p>
+    </article>`;
+}
+
+// DOMに触れない純粋関数: provider -> product_surface -> {buckets, unavailable}
+// のMapを組み立てる。payload自体が無いキーは絶対に作らない(spec: 「Do not
+// invent grouping keys that are not in the payload」)。
+function groupUsageAllowances(payload) {
+  const providers = new Map();
+  const ensureSurface = (provider, surface) => {
+    if (!providers.has(provider)) providers.set(provider, new Map());
+    const bySurface = providers.get(provider);
+    if (!bySurface.has(surface)) bySurface.set(surface, { buckets: [], unavailable: [] });
+    return bySurface.get(surface);
+  };
+  (payload.allowances || []).forEach((bucket) => {
+    ensureSurface(bucket.provider, bucket.product_surface).buckets.push(bucket);
+  });
+  (payload.unavailable || []).forEach((item) => {
+    ensureSurface(item.provider, item.product_surface).unavailable.push(item);
+  });
+  return providers;
+}
+
+function renderLimitsAllowanceView(result) {
+  const target = document.querySelector("#limitsAllowanceBody");
+  if (!target) return;
+  if (!result || !result.ok || !result.data) {
+    target.innerHTML = `<p class="muted">${escapeHtml(USAGE_ALLOWANCE_ERROR_MESSAGE)}</p>`;
+    return;
+  }
+  const groups = groupUsageAllowances(result.data);
+  if (!groups.size) {
+    target.innerHTML = `<p class="muted">使用枠情報はまだありません。</p>`;
+    return;
+  }
+  const sectionsHtml = [];
+  for (const [provider, bySurface] of groups) {
+    const surfacesHtml = [];
+    for (const [surface, group] of bySurface) {
+      const cardsHtml = [
+        ...group.buckets.map(usageAllowanceBucketCardHtml),
+        ...group.unavailable.map(usageAllowanceUnavailableCardHtml),
+      ].join("");
+      surfacesHtml.push(`
+        <div class="usage-allowance-surface-group">
+          <h4>${escapeHtml(surface)}</h4>
+          <div class="cards">${cardsHtml}</div>
+        </div>`);
+    }
+    sectionsHtml.push(`
+      <section class="usage-allowance-provider-group">
+        <h3>${escapeHtml(provider)}</h3>
+        ${surfacesHtml.join("")}
+      </section>`);
+  }
+  target.innerHTML = sectionsHtml.join("");
+}
+
+// DOMに触れない純粋関数: bucketごとに1行を作り、そのbucketの中で最も使用率の
+// 高いwindowを代表として選ぶ。詳細な内訳の列挙はLimitsビューの役割であり、
+// 概要は1行要約に留める(spec section 6)。
+//
+// (provider, product_surface)で束ねてはいけない: schemas.pyのUsageAllowanceBucket
+// が明示するとおりこの組は一意キーではなく、同じ面に別sourceのbucketが並ぶ
+// (例: Codexの自動取得と手動入力はどちらもopenai/work_codex)。束ねると
+// 片方の観測値が画面から消える。
+function usageAllowanceOverviewRows(payload) {
+  return (payload.allowances || []).map((bucket) => {
+    const windows = Array.isArray(bucket.windows) ? bucket.windows : [];
+    let representative = null;
+    windows.forEach((window) => {
+      const currentPercent = representative ? representative.used_percent : -Infinity;
+      if (window.used_percent > currentPercent) representative = window;
+    });
+    return { provider: bucket.provider, surface: bucket.product_surface, window: representative, bucket };
+  });
+}
+
+// used_percentが無い場合に"未取得%"のような読めない表記を作らない。
+function usageAllowanceUsedPercentText(usedPercent) {
+  if (usedPercent === null || usedPercent === undefined) return "使用率不明";
+  return `${fmtNumber(usedPercent)}%`;
+}
+
+function usageAllowanceOverviewRowHtml(entry) {
+  const badgeHtml = usageAllowanceSourceBadgeHtml(entry.bucket.source_kind);
+  const stale = entry.bucket.status === "stale";
+  // staleは値がある状態なので行自体は値として描くが、生の値と見分けが
+  // つかないままにはしない。
+  const staleMarkerHtml = stale ? `<span class="status status-warn">最終取得値</span>` : "";
+  // 同じ面に複数bucketが並び得るため、面名だけでは行を識別できない。
+  // bucket名が面名と同じ(display_name/limit_idがどちらもnull)ときだけ省く。
+  const bucketTitle = usageAllowanceBucketTitle(entry.bucket);
+  const titleText =
+    bucketTitle === entry.surface
+      ? `${entry.provider} / ${entry.surface}`
+      : `${entry.provider} / ${entry.surface}・${bucketTitle}`;
+  const titleHtml = escapeHtml(titleText);
+  if (!entry.window) {
+    return `
+      <div class="usage-allowance-overview-row">
+        <span>${titleHtml}</span>
+        <span class="muted">枠情報なし</span>
+        ${staleMarkerHtml}
+        ${badgeHtml}
+      </div>`;
+  }
+  const label = usageAllowanceWindowLabel(entry.window.window_duration_minutes);
+  const resetText = usageAllowanceWindowResetText(entry.window.resets_at, stale);
+  return `
+    <div class="usage-allowance-overview-row">
+      <span>${titleHtml}</span>
+      <span>${escapeHtml(label)} ${usageAllowanceUsedPercentText(entry.window.used_percent)}</span>
+      <span class="muted">reset: ${escapeHtml(resetText)}</span>
+      ${staleMarkerHtml}
+      ${badgeHtml}
+    </div>`;
+}
+
+function usageAllowanceOverviewStatusLineHtml(item) {
+  const badgeHtml = usageAllowanceSourceBadgeHtml(item.source_kind);
+  return `
+    <div class="usage-allowance-overview-row usage-allowance-unavailable">
+      <span>${escapeHtml(item.provider)} / ${escapeHtml(item.product_surface)}</span>
+      <span class="status status-pending">取得不能（${escapeHtml(item.status)}）</span>
+      ${badgeHtml}
+    </div>`;
+}
+
+function renderOverviewView(result) {
+  const generatedAtEl = document.querySelector("#overviewGeneratedAt");
+  const rowsEl = document.querySelector("#overviewRows");
+  const unavailableEl = document.querySelector("#overviewUnavailable");
+  if (!rowsEl || !unavailableEl) return;
+
+  if (!result || !result.ok || !result.data) {
+    if (generatedAtEl) generatedAtEl.textContent = "";
+    rowsEl.innerHTML = `<p class="muted">${escapeHtml(USAGE_ALLOWANCE_ERROR_MESSAGE)}</p>`;
+    unavailableEl.innerHTML = "";
+    return;
+  }
+
+  const payload = result.data;
+  if (generatedAtEl) generatedAtEl.textContent = `最終更新: ${fmtDate(payload.generated_at)}`;
+
+  const rows = usageAllowanceOverviewRows(payload);
+  rowsEl.innerHTML = rows.length
+    ? rows.map(usageAllowanceOverviewRowHtml).join("")
+    : `<p class="muted">使用枠情報はまだありません。</p>`;
+
+  // ここは「取得できていない面」だけの区画。staleなbucketは値がある行として
+  // 上のリストに出しており(行内に最終取得値バッジが付く)、ここへ再掲すると
+  // 同じ面が2回現れ、しかも取得不能の並びに紛れて読み違えられる。
+  unavailableEl.innerHTML = (payload.unavailable || []).map(usageAllowanceOverviewStatusLineHtml).join("");
+}
+
+// ============================================================================
+// アプリケーションレベルナビゲーション(概要 / 上限 / 診断 / 履歴)
+//
+// [data-view]を持つ全要素のhiddenプロパティを切り替えるだけで、既存section
+// の並び順・id・構造は一切変更しない。location.hashを唯一の真実の情報源とし、
+// 戻る/進む/リロードでも同じビューを保つ。
+// ============================================================================
+
+const APP_VIEWS = ["overview", "limits", "diagnostics", "history"];
+const APP_VIEW_NAV_BUTTON_IDS = {
+  overview: "navOverview",
+  limits: "navLimits",
+  diagnostics: "navDiagnostics",
+  history: "navHistory",
+};
+
+// DOMに触れない純粋関数: location.hashの生文字列から有効なview名を決める。
+// 未知/空のhashは常にoverviewへfallbackする。
+function normalizeAppView(hash) {
+  const view = String(hash || "").replace(/^#/, "");
+  return APP_VIEWS.includes(view) ? view : "overview";
+}
+
+// DOMに触れない純粋関数: 現在のhashが既にそのviewを指しているなら書き込まない。
+// 書き込み続けると、hashchange経由の描画(戻る/進む)が新しい履歴を積み直し、
+// 「戻る」で前のページへ抜けられなくなる。
+function shouldWriteAppViewHash(currentHash, view) {
+  return String(currentHash || "") !== `#${view}`;
+}
+
+function setActiveView(view, options) {
+  const { updateHash = true } = options || {};
+  const normalized = normalizeAppView(view);
+  document.querySelectorAll("[data-view]").forEach((el) => {
+    el.hidden = el.dataset.view !== normalized;
+  });
+  Object.entries(APP_VIEW_NAV_BUTTON_IDS).forEach(([viewName, buttonId]) => {
+    const button = document.querySelector(`#${buttonId}`);
+    if (!button) return;
+    if (viewName === normalized) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
+  });
+  if (updateHash && shouldWriteAppViewHash(location.hash, normalized)) {
+    location.hash = normalized;
+  }
+}
+
 function githubActionsBillingPlanLabel(planName) {
   if (planName === "free") return "Free";
   if (planName === "pro") return "Pro";
@@ -976,6 +1357,7 @@ async function loadAll() {
     claudeDesktopCloudUsage,
     codexUsage,
     codexRateLimits,
+    usageAllowances,
   ] = await Promise.all([
     api("/api/services"),
     api("/api/limits"),
@@ -994,6 +1376,10 @@ async function loadAll() {
     api("/api/claude-code-usage/manual"),
     api("/api/codex-usage"),
     api("/api/codex-rate-limits"),
+    // 他のPromise.all要素とは異なりapi()(throwする)ではなくfetchAllowancesSafe()
+    // (throwしない)を使う: この1エンドポイントの失敗でPromise.all全体を落とし、
+    // 既存ダッシュボード全体を壊すことを避けるため(spec section 5)。
+    fetchAllowancesSafe(),
   ]);
   state.dashboard = dashboard;
   state.limits = limits;
@@ -1011,6 +1397,8 @@ async function loadAll() {
   renderClaudeDesktopCloudUsage(claudeDesktopCloudUsage);
   renderCodexUsage(codexUsage);
   renderCodexRateLimits(codexRateLimits);
+  renderOverviewView(usageAllowances);
+  renderLimitsAllowanceView(usageAllowances);
 }
 
 async function refreshCollectorRuns() {
@@ -1487,6 +1875,21 @@ function updateUsageModeUi() {
 }
 
 function initApp() {
+  Object.entries(APP_VIEW_NAV_BUTTON_IDS).forEach(([viewName, buttonId]) => {
+    const button = document.querySelector(`#${buttonId}`);
+    if (!button) return;
+    button.addEventListener("click", () => setActiveView(viewName));
+  });
+  // hashchange時は描画するだけ。ここで書き戻すと戻る/進むが無効化される。
+  window.addEventListener("hashchange", () => setActiveView(normalizeAppView(location.hash), { updateHash: false }));
+  // 初回同期はreplaceState: hash無しで開いたときに履歴を1つ増やさないため
+  // (増やすと最初の「戻る」がこのページ内に吸われる)。
+  const initialView = normalizeAppView(location.hash);
+  setActiveView(initialView, { updateHash: false });
+  if (shouldWriteAppViewHash(location.hash, initialView) && window.history && window.history.replaceState) {
+    window.history.replaceState(null, "", `#${initialView}`);
+  }
+
   document.querySelector("#serviceForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.target));
@@ -1997,5 +2400,25 @@ if (typeof module !== "undefined") {
     codexRateLimitsErrorDisplay,
     confirmClaudeDesktopCloudUsageSave,
     parseDatetimeLocalToIsoOrNull,
+    fetchAllowancesSafe,
+    usageAllowanceSourceKindLabel,
+    usageAllowanceSourceBadgeHtml,
+    usageAllowanceWindowLabel,
+    usageAllowanceBucketTitle,
+    usageAllowanceWindowStatus,
+    usageAllowanceWindowResetText,
+    usageAllowanceWindowHtml,
+    usageAllowanceBucketCardHtml,
+    usageAllowanceUnavailableCardHtml,
+    groupUsageAllowances,
+    renderLimitsAllowanceView,
+    usageAllowanceOverviewRows,
+    usageAllowanceOverviewRowHtml,
+    usageAllowanceOverviewStatusLineHtml,
+    usageAllowanceUsedPercentText,
+    shouldWriteAppViewHash,
+    renderOverviewView,
+    normalizeAppView,
+    setActiveView,
   };
 }
