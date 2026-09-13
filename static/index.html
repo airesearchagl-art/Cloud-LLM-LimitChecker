@@ -18,8 +18,27 @@
       </div>
     </header>
 
+    <nav aria-label="ビュー切り替え">
+      <button id="navOverview" type="button">概要</button>
+      <button id="navLimits" type="button">上限</button>
+      <button id="navDiagnostics" type="button">診断</button>
+      <button id="navHistory" type="button">履歴</button>
+    </nav>
+
     <main>
-      <section class="toolbar" aria-label="ダッシュボードフィルター">
+      <section id="overviewView" data-view="overview" aria-live="polite">
+        <h2>概要</h2>
+        <p id="overviewGeneratedAt" class="muted"></p>
+        <div id="overviewRows"></div>
+        <div id="overviewUnavailable"></div>
+      </section>
+
+      <section id="limitsAllowanceView" data-view="limits" aria-live="polite">
+        <h2>使用枠</h2>
+        <div id="limitsAllowanceBody"></div>
+      </section>
+
+      <section class="toolbar" data-view="limits" aria-label="ダッシュボードフィルター">
         <label>
           <span>サービス名</span>
           <input id="filterService" type="search" placeholder="ChatGPT / Gemini / Claude" />
@@ -54,7 +73,7 @@
         </label>
       </section>
 
-      <section>
+      <section data-view="limits">
         <div class="section-heading">
           <h2>ダッシュボード</h2>
           <span id="resultCount" class="muted"></span>
@@ -62,7 +81,7 @@
         <div id="cards" class="cards"></div>
       </section>
 
-      <section class="grid">
+      <section class="grid" data-view="diagnostics">
         <form id="collectorForm" class="panel collector-panel">
           <h2>Collector実行</h2>
           <p class="form-note">
@@ -97,7 +116,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="diagnostics">
         <div class="panel" id="githubRateLimitPanel">
           <div class="panel-heading">
             <h2>GitHub API Rate Limit</h2>
@@ -110,7 +129,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="diagnostics">
         <div class="panel" id="githubActionsBillingPanel">
           <div class="panel-heading">
             <h2>GitHub Actions（月間利用枠）</h2>
@@ -123,7 +142,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="diagnostics">
         <div class="panel" id="githubGraphqlDiagnosticsPanel">
           <div class="panel-heading">
             <h2>GraphQL消費診断</h2>
@@ -137,7 +156,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="limits">
         <div class="panel" id="claudeDesktopCloudUsagePanel">
           <div class="panel-heading">
             <h2>Claude Desktop Cloud 使用率（手動入力）</h2>
@@ -175,7 +194,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="limits">
         <div class="panel" id="codexRateLimitsPanel">
           <div class="panel-heading">
             <h2>Codex Usage（自動取得）</h2>
@@ -188,7 +207,7 @@
         </div>
       </section>
 
-      <section>
+      <section data-view="limits">
         <div class="panel" id="codexUsagePanel">
           <div class="panel-heading">
             <h2>Codex Usage（手動入力・fallback）</h2>
@@ -226,7 +245,7 @@
         </div>
       </section>
 
-      <section class="grid">
+      <section class="grid" data-view="limits">
         <form id="serviceForm" class="panel">
           <h2>サービス登録</h2>
           <input name="name" placeholder="ChatGPT" required />
@@ -272,7 +291,7 @@
         </form>
       </section>
 
-      <section class="grid">
+      <section class="grid" data-view="history">
         <div class="panel">
           <h2>アラート</h2>
           <div id="alerts"></div>

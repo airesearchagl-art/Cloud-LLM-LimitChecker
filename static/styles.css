@@ -35,6 +35,44 @@ body {
   gap: 10px;
 }
 
+nav[aria-label="ビュー切り替え"] {
+  background: white;
+  border-bottom: 1px solid #d9e1e5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 24px;
+}
+
+nav[aria-label="ビュー切り替え"] button {
+  background: #eef3f4;
+  border-color: #c3d0d5;
+  color: #17323a;
+  min-width: 96px;
+  width: auto;
+}
+
+nav[aria-label="ビュー切り替え"] button:hover {
+  background: #e0e9eb;
+}
+
+/* aria-current(色以外のプログラム的な状態表現)に加え、背景色・文字色の両方を
+   反転させることで色覚だけに頼らない差を作る。テキスト自体(概要/上限/診断/履歴)
+   はどちらの状態でも変わらず読める。 */
+nav[aria-label="ビュー切り替え"] button[aria-current="page"] {
+  background: #1f6673;
+  border-color: #1f6673;
+  color: white;
+}
+
+/* [data-view]要素は既存の.toolbar/.grid等が`display: grid|flex`を宣言しており、
+   同一詳細度のブラウザ既定[hidden]規則をそのまま上書きしてしまうため、
+   `hidden`属性のトグルが実際には効かなくなる。属性セレクタ2つ分の詳細度で
+   明示的に上書きし、setActiveView()のel.hidden切り替えを確実に効かせる。 */
+[data-view][hidden] {
+  display: none;
+}
+
 h1,
 h2 {
   letter-spacing: 0;
@@ -310,6 +348,21 @@ button {
 
 button:hover {
   background: #195762;
+}
+
+/* このスタイルシートには従来:focus-visibleルールが無かった。キーボード操作
+   (Tab移動)時に、button/select/input全般とビュー切り替えnavボタンで
+   視認できるフォーカスリングを付ける。既存の見た目(色・余白等)は変更しない。 */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 3px solid #0b5fff;
+  outline-offset: 2px;
+}
+
+nav[aria-label="ビュー切り替え"] button:focus-visible {
+  outline: 3px solid #0b5fff;
+  outline-offset: 2px;
 }
 
 .row {
@@ -590,6 +643,79 @@ button:hover {
   color: #596970;
 }
 
+/* 概要(#overviewView) / 使用枠(#limitsAllowanceView)ビュー専用。
+   既存の.cards/.panelのauto-fitグリッド作法を再利用し、固定px幅は使わない
+   (1280x720/1366x768/1920x1080のいずれでも横スクロールしない)。 */
+.usage-allowance-provider-group {
+  margin-bottom: 20px;
+}
+
+.usage-allowance-provider-group h3 {
+  font-size: 16px;
+  margin: 0 0 10px;
+}
+
+.usage-allowance-surface-group {
+  margin-bottom: 16px;
+}
+
+.usage-allowance-surface-group h4 {
+  color: #46545c;
+  font-size: 13px;
+  font-weight: 700;
+  margin: 0 0 8px;
+}
+
+.usage-allowance-card {
+  display: grid;
+  gap: 10px;
+}
+
+.usage-allowance-meta {
+  display: block;
+}
+
+.usage-allowance-window {
+  border-top: 1px solid #edf1f3;
+  padding-top: 8px;
+}
+
+.usage-allowance-window:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.usage-allowance-window-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  font-weight: 700;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.usage-allowance-window-slot {
+  font-weight: 400;
+}
+
+.usage-allowance-overview-row {
+  align-items: center;
+  background: white;
+  border: 1px solid #d9e1e5;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+}
+
+.usage-allowance-unavailable {
+  background: #f7f9fa;
+}
+
 @media (max-width: 760px) {
   .topbar,
   .actions,
@@ -605,6 +731,11 @@ button:hover {
 
   .cards {
     grid-template-columns: 1fr;
+  }
+
+  .usage-allowance-overview-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
