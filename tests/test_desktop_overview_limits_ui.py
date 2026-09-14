@@ -127,13 +127,19 @@ def test_index_html_data_view_mapping_counts_match_spec():
     # codexRateLimitsPanel section, codexUsagePanel section, the
     # serviceForm/limitForm/usageForm grid, plus the new limitsAllowanceView.
     assert html.count('data-view="limits"') == 7
-    # diagnostics: collectorForm/collectorRuns grid, githubRateLimitPanel,
-    # githubActionsBillingPanel, githubGraphqlDiagnosticsPanel.
-    assert html.count('data-view="diagnostics"') == 4
+    # diagnostics: diagnosticsSummarySection, githubRateLimitPanel,
+    # githubActionsBillingPanel, githubGraphqlDiagnosticsPanel, and the
+    # collectorForm/collectorRuns grid. The summary section was added by the
+    # Diagnostics/History/Analyze phase, which also moved the collector grid
+    # to the end of the group; see tests/test_desktop_diagnostics_history_analyze_ui.py
+    # for the ordering contract.
+    assert html.count('data-view="diagnostics"') == 5
     # history: the alerts/history grid.
     assert html.count('data-view="history"') == 1
     # overview: only the new overview section.
     assert html.count('data-view="overview"') == 1
+    # analyze: the Analysis Pack section.
+    assert html.count('data-view="analyze"') == 1
 
 
 # ---------------------------------------------------------------------------
