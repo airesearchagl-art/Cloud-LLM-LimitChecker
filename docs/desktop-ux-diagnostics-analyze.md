@@ -116,6 +116,7 @@ Packはallowlist方式です。列挙したキーだけを写し、値が `null`
 
 - `seconds_until_reset` は `collected_at` 時点から数えた相対秒数です。Packの `generated_at` 基準ではないことを補足行で明記します。Actions Billingが `stale=true` のときは、現在値として扱わないよう補足行を出します。
 - Diagnostic sessions / samples の取得状態は `state.diagnosticsHistoryStatus` に保持します。起動時の取得に失敗した場合は「取得失敗（0件ではありません）」、まだ取得していない場合は「未取得（0件ではありません）」と書き、取得済みで空の場合だけ「データなし（取得済み・0件）」と書きます。
+- start/stop成功後の補助再取得（Recent Sessions / Sample Timeline）に失敗した場合も同じく「取得失敗」とし、以前に取得した配列は破棄します。古い履歴を現在の取得済みデータとしてPackへ出さないためです。start/stop操作自体の成功表示は変えません。
 - session節の `graphql_delta_total`（期間全体の差分）/ `max_valid_interval_delta`（期間中で最大の区間差分）は、どちらもアカウント全体のGraphQLカウンタから求めた値です。Activity自身の消費量ではないことを節の冒頭に明記します。
 - Sample Timelineの `active_activities` は、取得済みのsession一覧（最新20件）だけから導出します。一覧外のsessionが動いていた可能性を否定できないため、該当が無い場合も「なし」と断定せず「取得済みsession一覧内に該当なし」と書きます。
 

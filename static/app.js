@@ -1368,10 +1368,13 @@ async function refreshGithubGraphqlDiagnosticsSessions() {
   return { sessions, samples };
 }
 
-// 起動時のsessions/samples取得に失敗したときの後始末。画面に固定メッセージを出す
-// だけでなく、stateにも「取得失敗」を残す。初期値の空配列のままだと、Analysis Pack
-// が「取得できなかった」と「0件だった」を区別できないため。失敗理由(例外)は読まない。
+// sessions/samples取得に失敗したとき(起動時、およびstart/stop成功後の補助再取得)の
+// 後始末。画面に固定メッセージを出すだけでなく、stateにも「取得失敗」を残す。
+// 以前に成功した配列は破棄する: 残しておくと、Analysis Packが古い履歴を
+// 取得済みの現在値として出力してしまうため。失敗理由(例外)は読まない。
 function markGithubGraphqlDiagnosticsHistoryFailed() {
+  state.diagnosticsSessions = [];
+  state.diagnosticsSamples = [];
   state.diagnosticsHistoryStatus = "failed";
   const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
   if (sessionsTarget) {
@@ -2887,8 +2890,9 @@ function initApp() {
       await refreshGithubGraphqlDiagnostics();
       // Recent Activity Sessions / Sample Timelineの再取得はあくまで補助表示の
       // 更新であり、これが失敗してもstart自体は成功しているので、失敗を
-      // start操作のエラーとしてresultSlotへ表示しない(握りつぶして良い)。
-      await refreshGithubGraphqlDiagnosticsSessions().catch(() => {});
+      // start操作のエラーとしてresultSlotへ表示しない。ただし握りつぶすと
+      // 以前の履歴が「取得済み」のまま残るため、履歴側だけを取得失敗にする。
+      await refreshGithubGraphqlDiagnosticsSessions().catch(markGithubGraphqlDiagnosticsHistoryFailed);
     } catch (error) {
       const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
       resultSlot.innerHTML = `<div class="github-error">${escapeHtml(resolved.user_message)}</div>`;
@@ -2917,8 +2921,9 @@ function initApp() {
         return;
       }
       await refreshGithubGraphqlDiagnostics();
-      // 同上: 補助表示の再取得失敗はstop操作自体のエラーとして表示しない。
-      await refreshGithubGraphqlDiagnosticsSessions().catch(() => {});
+      // 同上: 補助表示の再取得失敗はstop操作自体のエラーとして表示せず、
+      // 履歴側だけを取得失敗にする(古い履歴を現在値として残さない)。
+      await refreshGithubGraphqlDiagnosticsSessions().catch(markGithubGraphqlDiagnosticsHistoryFailed);
     } catch (error) {
       const resolved = githubGraphqlDiagnosticsErrorDisplay(null, null);
       githubGraphqlDiagnosticsContainer.insertAdjacentHTML(

@@ -1583,12 +1583,18 @@ console.log(JSON.stringify({
         "recoveredAsEmpty": True,
         "recoveredStillFailed": False,
     }
-    # 起動時の取得失敗がこの関数へ配線されていること(ここはソース上の配線確認)。
-    # 書き方(関数参照かarrowか)には依存させない。
-    assert re.search(
-        r"refreshGithubGraphqlDiagnosticsSessions\(\)\s*\.catch\([^;]*markGithubGraphqlDiagnosticsHistoryFailed",
+    # 起動時・start後・stop後の3か所すべてが失敗処理へ配線されていること(ソース上の確認)。
+    # start/stop後の2か所が一致するだけで起動時の配線を見逃さないよう、await無しの
+    # 起動時呼び出しを区別して数える。書き方(関数参照かarrowか)には依存させない。
+    call_sites = re.findall(
+        r"^[ \t]*(await )?refreshGithubGraphqlDiagnosticsSessions\(\)\s*\.catch\(([^;]*)\);",
         APP_JS_CODE,
+        re.MULTILINE,
     )
+    assert len(call_sites) == 3, call_sites
+    assert [awaited for awaited, _ in call_sites].count("") == 1, "起動時(await無し)の呼び出しが見つからない"
+    for awaited, handler in call_sites:
+        assert "markGithubGraphqlDiagnosticsHistoryFailed" in handler, f"失敗処理へ配線されていない: {awaited}{handler}"
 
 
 def test_pack_carries_collection_time_for_rate_limit_and_billing(tmp_path: Path) -> None:
@@ -1738,3 +1744,310 @@ def test_generate_reads_state_only_through_the_sources_function_source() -> None
         ]
     )
     assert len(re.findall(r"\bstate\.", sources_body)) == len(pairs)
+
+
+# ---------------------------------------------------------------------------
+# 補助再取得の失敗後に古い履歴をPackへ残さない(freshness)
+# ---------------------------------------------------------------------------
+
+HISTORY_FRESHNESS_JS = """
+const OLD_ACTOR = "OLD_ACTOR_SENTINEL";
+const NEW_ACTOR = "NEW_ACTOR_SENTINEL";
+const historySessions = (actor, used) => [
+  {
+    id: actor === OLD_ACTOR ? 1 : 2,
+    actor_type: actor,
+    label: actor + "_LABEL",
+    started_at: "2026-09-13T00:00:00+00:00",
+    ended_at: "2026-09-13T00:10:00+00:00",
+    status: "STOPPED",
+    stop_reason: "USER_STOP",
+    graphql_used_start: used
+  }
+];
+const historySamples = (used, collectedAt) => [
+  {
+    id: 1,
+    collected_at: collectedAt,
+    graphql_used: used,
+    fetch_status: "ok",
+    attribution_status: "SINGLE_ACTIVITY_CORRELATION"
+  }
+];
+const oldSessions = historySessions(OLD_ACTOR, 111111);
+const oldSamples = historySamples(111111, "2001-01-01T00:05:00+00:00");
+const newSessions = historySessions(NEW_ACTOR, 222222);
+const newSamples = historySamples(222222, "2026-09-13T00:05:00+00:00");
+const OLD_MARKERS = [OLD_ACTOR, "111111", "2001-01-01T00:05:00"];
+const FAILED_TEXT = "取得失敗（0件ではありません）";
+const countOf = (text, needle) => text.split(needle).length - 1;
+"""
+
+
+def test_refresh_failure_discards_previously_fetched_history_from_the_pack(tmp_path: Path) -> None:
+    """一度成功した履歴があっても、失敗後のPackは古い配列を取得済みの現在値として出さない。"""
+    result = node_json(
+        tmp_path,
+        FAKE_DOM_JS
+        + HISTORY_FRESHNESS_JS
+        + """
+global.document = makeDocument(
+  ["githubGraphqlDiagnosticsSessionsResult", "githubGraphqlDiagnosticsTimelineResult", "analysisPackOutput", "analysisPackStatus"],
+  []
+);
+app.renderGithubGraphqlDiagnosticsSessions(oldSessions, oldSamples);
+const statusAfterSuccess = app.analysisPackSourcesFromState().diagnosticsHistoryStatus;
+const before = app.generateAnalysisPack();
+app.markGithubGraphqlDiagnosticsHistoryFailed(new Error("RAW_EXCEPTION_SENTINEL"));
+const after = app.generateAnalysisPack();
+const sources = app.analysisPackSourcesFromState();
+console.log(JSON.stringify({
+  statusAfterSuccess,
+  oldPresentBeforeFailure: OLD_MARKERS.every((marker) => before.includes(marker)),
+  statusAfterFailure: sources.diagnosticsHistoryStatus,
+  cachedSessions: sources.diagnosticsSessions.length,
+  cachedSamples: sources.diagnosticsSamples.length,
+  oldLeaked: OLD_MARKERS.filter((marker) => after.includes(marker)),
+  activityLeaked: after.includes("activity_1"),
+  failedTextCount: countOf(after, FAILED_TEXT),
+  rawExceptionLeaked: after.includes("RAW_EXCEPTION_SENTINEL")
+}));
+""",
+    )
+    assert result == {
+        "statusAfterSuccess": "ok",
+        "oldPresentBeforeFailure": True,
+        "statusAfterFailure": "failed",
+        "cachedSessions": 0,
+        "cachedSamples": 0,
+        "oldLeaked": [],
+        "activityLeaked": False,
+        # Sessions節とSample Timeline節の2か所。
+        "failedTextCount": 2,
+        "rawExceptionLeaked": False,
+    }
+
+
+def test_successful_refresh_after_failure_restores_only_the_new_history(tmp_path: Path) -> None:
+    result = node_json(
+        tmp_path,
+        FAKE_DOM_JS
+        + HISTORY_FRESHNESS_JS
+        + """
+global.document = makeDocument(
+  ["githubGraphqlDiagnosticsSessionsResult", "githubGraphqlDiagnosticsTimelineResult", "analysisPackOutput", "analysisPackStatus"],
+  []
+);
+app.renderGithubGraphqlDiagnosticsSessions(oldSessions, oldSamples);
+app.markGithubGraphqlDiagnosticsHistoryFailed();
+app.renderGithubGraphqlDiagnosticsSessions(newSessions, newSamples);
+const recovered = app.generateAnalysisPack();
+console.log(JSON.stringify({
+  status: app.analysisPackSourcesFromState().diagnosticsHistoryStatus,
+  newPresent: recovered.includes(NEW_ACTOR) && recovered.includes("222222"),
+  oldLeaked: OLD_MARKERS.filter((marker) => recovered.includes(marker)),
+  stillFailed: recovered.includes(FAILED_TEXT)
+}));
+""",
+    )
+    assert result == {"status": "ok", "newPresent": True, "oldLeaked": [], "stillFailed": False}
+
+
+def test_start_and_stop_handlers_route_auxiliary_refresh_failure_to_history_failed(tmp_path: Path) -> None:
+    """実行時テスト: initAppが登録したstart/stopハンドラを実際に呼ぶ。
+
+    寛容な偽DOMを置いてからapp.jsを読み直すと、initAppがハンドラを登録する。
+    起動時の取得は失敗から始め(起動時の配線も実行時に確認する)、その後の成功で
+    古い履歴を入れる。start/stop自体のPOSTは成功させ、その後の補助再取得
+    (sessions/samples)だけを失敗させる。握りつぶすと以前の履歴がPackに残るので、
+    ここで検出できる。
+    """
+    script = (
+        HISTORY_FRESHNESS_JS
+        + """
+const tick = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+process.on("unhandledRejection", () => {});
+
+const registry = new Map();
+function lenientElement(key) {
+  return {
+    key,
+    innerHTML: "",
+    textContent: "",
+    value: "",
+    hidden: false,
+    disabled: false,
+    checked: false,
+    dataset: {},
+    style: {},
+    listeners: {},
+    inserted: [],
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+    removeEventListener() {},
+    setAttribute() {},
+    removeAttribute() {},
+    getAttribute() { return null; },
+    querySelector(selector) { return global.document.querySelector(selector); },
+    querySelectorAll() { return []; },
+    closest() { return null; },
+    insertAdjacentHTML(position, html) { this.inserted.push(html); },
+    appendChild() {},
+    focus() {},
+    reset() {}
+  };
+}
+global.document = {
+  querySelector(selector) {
+    if (!registry.has(selector)) registry.set(selector, lenientElement(selector));
+    return registry.get(selector);
+  },
+  querySelectorAll() { return []; },
+  addEventListener() {}
+};
+global.location = { hash: "", href: "" };
+global.window = { addEventListener() {}, history: { replaceState() {} }, confirm: () => false, location: global.location };
+global.FormData = class {
+  get(key) { return { actor_type: "codex", label: "handler test" }[key] || ""; }
+};
+
+let historyMode = "fail";
+const requests = [];
+const okResponse = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+global.fetch = async (url, options) => {
+  const path = String(url);
+  requests.push(((options && options.method) || "GET") + " " + path);
+  const isSessions = path.startsWith("/api/github-graphql-diagnostics/sessions");
+  const isSamples = path.startsWith("/api/github-graphql-diagnostics/samples");
+  if (isSessions || isSamples) {
+    if (historyMode === "fail") {
+      return { ok: false, status: 500, json: async () => ({}), text: async () => "RAW_EXCEPTION_SENTINEL" };
+    }
+    const fresh = historyMode === "new";
+    return okResponse({
+      items: isSessions ? (fresh ? newSessions : oldSessions) : fresh ? newSamples : oldSamples
+    });
+  }
+  if (path === "/api/github-graphql-diagnostics") return okResponse({ enabled: false });
+  return okResponse([]);
+};
+
+delete require.cache[require.resolve(__APP_JS_PATH__)];
+const live = require(__APP_JS_PATH__);
+
+(async () => {
+  // 固定時間ではなく、起動時の取得失敗が状態へ反映されるまで待つ(上限あり)。
+  for (let i = 0; i < 100 && live.analysisPackSourcesFromState().diagnosticsHistoryStatus !== "failed"; i += 1) {
+    await tick(20);
+  }
+  const container = global.document.querySelector("#githubGraphqlDiagnosticsResult");
+  const form = lenientElement("form");
+  const resultSlot = global.document.querySelector("#githubGraphqlDiagnosticsFormResult");
+  const stopButton = lenientElement("stop");
+  stopButton.dataset.sessionId = "1";
+  const submit = () =>
+    Promise.all((container.listeners.submit || []).map((fn) =>
+      fn({ target: { closest: (selector) => (selector === "#githubGraphqlDiagnosticsForm" ? form : null) }, preventDefault() {} })
+    ));
+  const clickStop = () =>
+    Promise.all((container.listeners.click || []).map((fn) =>
+      fn({ target: { closest: (selector) => (selector === ".github-graphql-diagnostics-stop" ? stopButton : null) } })
+    ));
+  const snapshot = () => {
+    const pack = live.generateAnalysisPack();
+    const sources = live.analysisPackSourcesFromState();
+    const visibleText = [
+      pack,
+      global.document.querySelector("#githubGraphqlDiagnosticsSessionsResult").innerHTML,
+      global.document.querySelector("#githubGraphqlDiagnosticsTimelineResult").innerHTML,
+      resultSlot.innerHTML,
+      container.innerHTML,
+      container.inserted.join("")
+    ].join("\\n");
+    return {
+      status: sources.diagnosticsHistoryStatus,
+      oldLeaked: OLD_MARKERS.filter((marker) => pack.includes(marker)),
+      newPresent: pack.includes(NEW_ACTOR),
+      failedTextCount: countOf(pack, FAILED_TEXT),
+      rawExceptionLeaked: visibleText.includes("RAW_EXCEPTION_SENTINEL")
+    };
+  };
+
+  const initial = snapshot();
+
+  historyMode = "old";
+  await clickStop();
+  const afterInitialRecovery = snapshot();
+
+  historyMode = "fail";
+  await submit();
+  const afterStartFailure = snapshot();
+  const startPosted = requests.includes("POST /api/github-graphql-diagnostics/start");
+  const startErrorShown = resultSlot.innerHTML.includes("github-error");
+
+  historyMode = "old";
+  await clickStop();
+  const beforeStopFailure = snapshot();
+
+  historyMode = "fail";
+  await clickStop();
+  const afterStopFailure = snapshot();
+  const stopPosted = requests.includes("POST /api/github-graphql-diagnostics/1/stop");
+  const stopErrorShown = container.inserted.some((html) => html.includes("github-error"));
+
+  historyMode = "new";
+  await submit();
+  const recovered = snapshot();
+
+  console.log(JSON.stringify({
+    initial,
+    afterInitialRecovery,
+    afterStartFailure,
+    startPosted,
+    startErrorShown,
+    beforeStopFailure,
+    afterStopFailure,
+    stopPosted,
+    stopErrorShown,
+    recovered
+  }));
+  process.exit(0);
+})();
+""".replace("__APP_JS_PATH__", json.dumps(APP_JS_REQUIRE_PATH))
+    )
+    result = node_json(tmp_path, script)
+    failed_state = {
+        "status": "failed",
+        "oldLeaked": [],
+        "newPresent": False,
+        "failedTextCount": 2,
+        "rawExceptionLeaked": False,
+    }
+    old_ok_state = {
+        "status": "ok",
+        "oldLeaked": ["OLD_ACTOR_SENTINEL", "111111", "2001-01-01T00:05:00"],
+        "newPresent": False,
+        "failedTextCount": 0,
+        "rawExceptionLeaked": False,
+    }
+    # 起動時の取得失敗は、initAppの配線どおり取得失敗として反映される。
+    assert result["initial"] == failed_state
+    # その後の成功で、古い履歴が「取得済み」として入る。
+    assert result["afterInitialRecovery"] == old_ok_state
+    # start成功 + 補助再取得失敗: 履歴だけが取得失敗になり、start自体はエラー表示しない。
+    assert result["startPosted"] is True
+    assert result["afterStartFailure"] == failed_state
+    assert result["startErrorShown"] is False
+    # stop成功 + 補助再取得失敗も同じ。
+    assert result["beforeStopFailure"] == old_ok_state
+    assert result["stopPosted"] is True
+    assert result["afterStopFailure"] == failed_state
+    assert result["stopErrorShown"] is False
+    # その後の成功で、新しい履歴だけが戻る。
+    assert result["recovered"] == {
+        "status": "ok",
+        "oldLeaked": [],
+        "newPresent": True,
+        "failedTextCount": 0,
+        "rawExceptionLeaked": False,
+    }
