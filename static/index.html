@@ -23,6 +23,7 @@
       <button id="navLimits" type="button">上限</button>
       <button id="navDiagnostics" type="button">診断</button>
       <button id="navHistory" type="button">履歴</button>
+      <button id="navAnalyze" type="button">分析</button>
     </nav>
 
     <main>
@@ -81,38 +82,18 @@
         <div id="cards" class="cards"></div>
       </section>
 
-      <section class="grid" data-view="diagnostics">
-        <form id="collectorForm" class="panel collector-panel">
-          <h2>Collector実行</h2>
-          <p class="form-note">
-            dry_run=trueでも各ベンダーの管理APIへのGET通信は発生します。モデル推論APIは呼びません。
-            dry_run=falseの場合、取得結果をusage_recordsへ保存します。
-          </p>
-          <label>
-            <span>vendor</span>
-            <select name="vendor" id="collectorVendor">
-              <option value="openai">openai</option>
-              <option value="gemini">gemini</option>
-              <option value="claude">claude</option>
-            </select>
-          </label>
-          <label>
-            <span>dry_run</span>
-            <select name="dry_run" id="collectorDryRun">
-              <option value="true">true: 確認のみ。usage_recordsには保存しない</option>
-              <option value="false">false: usage_recordsに保存する</option>
-            </select>
-          </label>
-          <button id="collectorSubmit" type="submit">Collectorを実行</button>
-          <div id="collectorResult" class="collector-result-slot"></div>
-        </form>
-
-        <div class="panel collector-history-panel">
+      <!-- aria-liveは付けない: この要約はloadAll()の中で各パネルのrenderから
+           4回まとめて再描画されるため、live regionにすると読み込みのたびに
+           同じ4行が最大4回読み上げられてしまう。 -->
+      <section id="diagnosticsSummarySection" data-view="diagnostics">
+        <div class="panel" id="diagnosticsSummaryPanel">
           <div class="panel-heading">
-            <h2>Collector実行履歴</h2>
-            <span class="muted">最新10件</span>
+            <h2>現在の状態</h2>
           </div>
-          <div id="collectorRuns"></div>
+          <p class="form-note">
+            すでに取得済みの各パネルの状態をそのまま並べた要約です。ここで新しい取得は行わず、元のデータに無い判定を作ることもありません。
+          </p>
+          <div id="diagnosticsSummary"></div>
         </div>
       </section>
 
@@ -153,6 +134,41 @@
           <div id="githubGraphqlDiagnosticsResult"></div>
           <div id="githubGraphqlDiagnosticsSessionsResult"></div>
           <div id="githubGraphqlDiagnosticsTimelineResult"></div>
+        </div>
+      </section>
+
+      <section class="grid" data-view="diagnostics">
+        <form id="collectorForm" class="panel collector-panel">
+          <h2>Collector実行</h2>
+          <p class="form-note">
+            dry_run=trueでも各ベンダーの管理APIへのGET通信は発生します。モデル推論APIは呼びません。
+            dry_run=falseの場合、取得結果をusage_recordsへ保存します。
+          </p>
+          <label>
+            <span>vendor</span>
+            <select name="vendor" id="collectorVendor">
+              <option value="openai">openai</option>
+              <option value="gemini">gemini</option>
+              <option value="claude">claude</option>
+            </select>
+          </label>
+          <label>
+            <span>dry_run</span>
+            <select name="dry_run" id="collectorDryRun">
+              <option value="true">true: 確認のみ。usage_recordsには保存しない</option>
+              <option value="false">false: usage_recordsに保存する</option>
+            </select>
+          </label>
+          <button id="collectorSubmit" type="submit">Collectorを実行</button>
+          <div id="collectorResult" class="collector-result-slot"></div>
+        </form>
+
+        <div class="panel collector-history-panel">
+          <div class="panel-heading">
+            <h2>Collector実行履歴</h2>
+            <span class="muted">最新10件</span>
+          </div>
+          <div id="collectorRuns"></div>
         </div>
       </section>
 
@@ -309,10 +325,44 @@
                 <option value="claude">Claude API</option>
                 <option value="api">API由来すべて</option>
               </select>
+              <select id="historyPeriod" aria-label="使用履歴の期間">
+                <option value="all">すべての期間</option>
+                <option value="today">今日</option>
+                <option value="7d">7日</option>
+                <option value="30d">30日</option>
+              </select>
               <button id="exportUsageCsv" type="button">usage records CSV Export</button>
             </div>
           </div>
+          <p class="form-note">
+            手入力・補正の行は、その時点で追加された記録です。API由来の行は同じ記録が新しい値へ上書きされ、しかも表示している日時は行が書かれた時刻ではなく、取り込んだ利用期間の終わりです。発生した出来事の履歴としては読めません。
+            期間の絞り込みは、この日時を基準に取得済みの一覧へ対して行い、追加のサーバー取得は発生しません。
+          </p>
           <div id="history"></div>
+          <div class="history-more-actions">
+            <span id="historyCount" class="muted"></span>
+            <button id="historyMore" type="button" hidden>もっと見る</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- aria-liveはこのsectionではなく、実際に短い通知が出る
+           #analysisPackStatus 側だけに付ける(live regionを入れ子にしない)。 -->
+      <section id="analyzeView" data-view="analyze">
+        <div class="panel" id="analysisPackPanel">
+          <div class="panel-heading">
+            <h2>分析用データ（Analysis Pack）</h2>
+            <button id="analysisPackGenerate" type="button">Analysis Packを生成</button>
+          </div>
+          <p class="form-note">
+            この画面がすでに取得済みのデータだけからテキストを組み立てます。生成時に新しいサーバー取得は行わず、外部のAIサービスへ自動送信することもありません。
+            内容を確認したうえで、必要なときだけ手元のAIツールへ貼り付けてください。Repository名・PR番号・ラベル・メモ・エラー詳細・アカウント情報は含めません。
+          </p>
+          <textarea id="analysisPackOutput" class="analysis-pack-output" readonly rows="18" aria-label="Analysis Pack本文" placeholder="「Analysis Packを生成」を押すと、ここに内容が表示されます。"></textarea>
+          <div class="history-more-actions">
+            <button id="analysisPackCopy" type="button">クリップボードへコピー</button>
+          </div>
+          <div id="analysisPackStatus" class="muted" aria-live="polite"></div>
         </div>
       </section>
     </main>

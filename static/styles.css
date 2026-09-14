@@ -716,6 +716,115 @@ nav[aria-label="ビュー切り替え"] button:focus-visible {
   background: #f7f9fa;
 }
 
+/* 診断サマリー(#diagnosticsSummary)。状態は既存の.github-resource-statusピルを
+   そのまま流用し、色に加えてラベル文字列(Normal/内訳判定不可/計測中 等)でも
+   読めるようにする(色だけに依存しない)。 */
+.diagnostics-summary-row {
+  align-items: center;
+  border-top: 1px solid #edf1f3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.diagnostics-summary-row:first-of-type {
+  border-top: none;
+}
+
+.diagnostics-summary-label {
+  font-weight: 700;
+  min-width: 200px;
+}
+
+.diagnostics-summary-detail {
+  flex: 1 1 240px;
+}
+
+/* GraphQL消費診断はこれらのクラス名でDOMを組み立てていたが、対応するCSS規則が
+   これまで1つも存在しなかった。行の区切りと字下げだけを与える。相関状態は
+   文字列で表現しているので、ここで状態色を足して断定的な意味を作らない。 */
+.github-graphql-diagnostics-session,
+.github-graphql-diagnostics-history-row,
+.github-graphql-diagnostics-timeline-row {
+  background: #f7f9fa;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+}
+
+.github-graphql-diagnostics-session-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.github-graphql-diagnostics-actor {
+  background: #e3ebee;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.github-graphql-diagnostics-label {
+  font-weight: 700;
+}
+
+.github-graphql-diagnostics-meta {
+  color: #46545c;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.github-graphql-diagnostics-history,
+.github-graphql-diagnostics-timeline {
+  margin-top: 12px;
+}
+
+.github-graphql-diagnostics-stop {
+  min-width: 120px;
+  width: auto;
+}
+
+/* 分析用データ(Analysis Pack)。textareaが主でコピーボタンは補助のため、
+   textarea自体を読める大きさにする。共通のinput/select/button規則は
+   textareaを対象にしていないので、枠線・余白・focusリングをここで揃える。 */
+.analysis-pack-output {
+  border: 1px solid #bac7cd;
+  border-radius: 6px;
+  box-sizing: border-box;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 100%;
+  min-height: 280px;
+  padding: 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.analysis-pack-output:focus-visible {
+  outline: 3px solid #0b5fff;
+  outline-offset: 2px;
+}
+
+.history-more-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.history-more-actions button {
+  min-width: 200px;
+  width: auto;
+}
+
 @media (max-width: 760px) {
   .topbar,
   .actions,
@@ -736,6 +845,15 @@ nav[aria-label="ビュー切り替え"] button:focus-visible {
   .usage-allowance-overview-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .diagnostics-summary-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .history-more-actions button {
+    width: 100%;
   }
 }
 

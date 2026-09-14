@@ -8,6 +8,20 @@ const state = {
   codexRateLimits: null,
   claudeDesktopCloudUsage: null,
   githubGraphqlDiagnostics: null,
+  // 診断サマリーと分析用データ(Analysis Pack)は、すでに取得済みのレスポンスだけを
+  // 読む。そのため各render関数が受け取ったデータをここへ保持しておき、生成時に
+  // 新しいfetchを一切発生させない(既存のrenderCodexRateLimits/renderCodexUsageが
+  // 自分でstateへ代入しているのと同じ規約に揃える)。
+  githubRateLimit: null,
+  githubActionsBilling: null,
+  diagnosticsSessions: [],
+  diagnosticsSamples: [],
+  // sessions/samplesの取得状態。null=未取得、"ok"=取得済み、"failed"=取得失敗。
+  // 空配列だけでは「0件」と「取得できていない」を区別できないため別に持つ。
+  diagnosticsHistoryStatus: null,
+  usageAllowances: null,
+  historyVisibleCount: 0,
+  analysisPackText: "",
 };
 
 const api = async (path, options = {}) => {
@@ -380,7 +394,9 @@ function githubRateLimitHtml(data) {
 }
 
 function renderGithubRateLimit(data) {
+  state.githubRateLimit = data;
   document.querySelector("#githubRateLimitResult").innerHTML = githubRateLimitHtml(data);
+  renderDiagnosticsSummary();
 }
 
 function githubActionsBillingStatusClass(status) {
@@ -697,6 +713,9 @@ function usageAllowanceOverviewStatusLineHtml(item) {
 }
 
 function renderOverviewView(result) {
+  // 取得できなかった場合にnullへ戻す: 前回成功時のpayloadが残ったまま
+  // 分析用データへ混ざらないようにする。
+  state.usageAllowances = result && result.ok && result.data ? result.data : null;
   const generatedAtEl = document.querySelector("#overviewGeneratedAt");
   const rowsEl = document.querySelector("#overviewRows");
   const unavailableEl = document.querySelector("#overviewUnavailable");
@@ -731,12 +750,13 @@ function renderOverviewView(result) {
 // 戻る/進む/リロードでも同じビューを保つ。
 // ============================================================================
 
-const APP_VIEWS = ["overview", "limits", "diagnostics", "history"];
+const APP_VIEWS = ["overview", "limits", "diagnostics", "history", "analyze"];
 const APP_VIEW_NAV_BUTTON_IDS = {
   overview: "navOverview",
   limits: "navLimits",
   diagnostics: "navDiagnostics",
   history: "navHistory",
+  analyze: "navAnalyze",
 };
 
 // DOMに触れない純粋関数: location.hashの生文字列から有効なview名を決める。
@@ -877,7 +897,9 @@ function githubActionsBillingCardHtml(data, isStale) {
 }
 
 function renderGithubActionsBilling(data) {
+  state.githubActionsBilling = data;
   document.querySelector("#githubActionsBillingResult").innerHTML = githubActionsBillingHtml(data);
+  renderDiagnosticsSummary();
 }
 
 // ============================================================================
@@ -906,6 +928,23 @@ const GITHUB_GRAPHQL_DIAGNOSTICS_ATTRIBUTION_LABELS = {
 // 単独露出しないようにするため)。
 function githubGraphqlDiagnosticsAttributionLabel(status) {
   return GITHUB_GRAPHQL_DIAGNOSTICS_ATTRIBUTION_LABELS[status] || "不明";
+}
+
+// fetch_statusはDeltaOutcome(ok/no_previous/reset_boundary/counter_regression)に
+// 加えて、fetch失敗時に限りcontrollerが直接書き込む"fetch_failed"も保存され得る
+// (app/github_graphql_diagnostics_controller.py)。型エイリアスに載っていない値も
+// DBには入るため、ここでは5値すべてを明示的に写す。未知の値は生のenum文字列を
+// 単独露出させず「不明」へfallbackする。
+const GITHUB_GRAPHQL_DIAGNOSTICS_FETCH_STATUS_LABELS = {
+  ok: "取得成功",
+  no_previous: "直前サンプルなし",
+  reset_boundary: "reset境界（差分判定不可）",
+  counter_regression: "カウンタ減少（差分判定不可）",
+  fetch_failed: "取得失敗",
+};
+
+function githubGraphqlDiagnosticsFetchStatusLabel(status) {
+  return GITHUB_GRAPHQL_DIAGNOSTICS_FETCH_STATUS_LABELS[status] || "不明";
 }
 
 const GITHUB_GRAPHQL_DIAGNOSTICS_GENERIC_ERROR_MESSAGE =
@@ -1218,12 +1257,14 @@ function githubGraphqlDiagnosticsTimelineRowHtml(sample, activeLabels) {
   const labels = Array.isArray(activeLabels) ? activeLabels : [];
   const activityText = labels.length ? escapeHtml(labels.join(", ")) : "—";
   const attributionLabel = escapeHtml(githubGraphqlDiagnosticsAttributionLabel(sample.attribution_status));
+  const fetchStatusLabel = escapeHtml(githubGraphqlDiagnosticsFetchStatusLabel(sample.fetch_status));
 
   return `
     <div class="github-graphql-diagnostics-timeline-row">
       <div class="github-graphql-diagnostics-meta">時刻: ${time}</div>
       <div class="github-graphql-diagnostics-meta">GraphQL used: ${used}</div>
       <div class="github-graphql-diagnostics-meta">観測された差分: ${delta}</div>
+      <div class="github-graphql-diagnostics-meta">取得状態: ${fetchStatusLabel}</div>
       <div class="github-graphql-diagnostics-meta">Active Activity: ${activityText}</div>
       <div class="github-graphql-diagnostics-meta">相関状態: ${attributionLabel}</div>
     </div>`;
@@ -1279,7 +1320,9 @@ function githubGraphqlDiagnosticsRenderPanel(data) {
 }
 
 function renderGithubGraphqlDiagnostics(data) {
+  state.githubGraphqlDiagnostics = data;
   document.querySelector("#githubGraphqlDiagnosticsResult").innerHTML = githubGraphqlDiagnosticsRenderPanel(data);
+  renderDiagnosticsSummary();
 }
 
 async function refreshGithubGraphqlDiagnostics() {
@@ -1293,6 +1336,11 @@ async function refreshGithubGraphqlDiagnostics() {
 // タイムライン側の「そのサンプル時点でどのActivityがactiveだったか」の判定にも
 // 使うため、1回のfetchで両方の描画に使い回す(2回目のsessions fetchはしない)。
 function renderGithubGraphqlDiagnosticsSessions(sessions, samples) {
+  // 分析用データ(Analysis Pack)はここで受け取った配列をそのまま再利用する。
+  // 生成時に/sessions・/samplesを取り直さないため。
+  state.diagnosticsSessions = Array.isArray(sessions) ? sessions : [];
+  state.diagnosticsSamples = Array.isArray(samples) ? samples : [];
+  state.diagnosticsHistoryStatus = "ok";
   const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
   if (sessionsTarget) {
     sessionsTarget.innerHTML = githubGraphqlDiagnosticsSessionComparisonTableHtml(sessions);
@@ -1318,6 +1366,559 @@ async function refreshGithubGraphqlDiagnosticsSessions() {
   const samples = Array.isArray(samplesResponse.items) ? samplesResponse.items : [];
   renderGithubGraphqlDiagnosticsSessions(sessions, samples);
   return { sessions, samples };
+}
+
+// 起動時のsessions/samples取得に失敗したときの後始末。画面に固定メッセージを出す
+// だけでなく、stateにも「取得失敗」を残す。初期値の空配列のままだと、Analysis Pack
+// が「取得できなかった」と「0件だった」を区別できないため。失敗理由(例外)は読まない。
+function markGithubGraphqlDiagnosticsHistoryFailed() {
+  state.diagnosticsHistoryStatus = "failed";
+  const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
+  if (sessionsTarget) {
+    sessionsTarget.innerHTML = `<p class="muted">履歴の取得に失敗しました。</p>`;
+  }
+  const timelineTarget = document.querySelector("#githubGraphqlDiagnosticsTimelineResult");
+  if (timelineTarget) {
+    timelineTarget.innerHTML = `<p class="muted">サンプルの取得に失敗しました。</p>`;
+  }
+}
+
+// ============================================================================
+// 診断サマリー(Diagnostics Summary)
+//
+// 既に取得済みの各パネルのレスポンスを並べ替えて見せるだけの射影であり、
+// 新しい取得も、元データに無い判定の合成も行わない。特に:
+//   - GitHub APIのOverall判定はバックエンド(determine_overall)がcore/graphqlだけで
+//     決めた値をそのまま出す。searchを根拠へ足さない。
+//   - GitHub Actions Billingのstatusはusage_breakdown_inconclusive/plan_unknownの
+//     2値しか存在しない。「正常」という状態を作らない。
+// ============================================================================
+
+const DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS = "github-status-unknown";
+
+function diagnosticsSummaryUnknownItem(label) {
+  return { label, statusText: "未取得", statusClass: DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS, detail: "", stale: false };
+}
+
+// DOMに触れない純粋関数。data.fetchedがfalseでlast_knownがある場合は、last_known側の
+// overallを「最終取得値」として示す(現在の状態として断定しない)。
+function diagnosticsSummaryGithubRateLimitItem(data) {
+  const label = "GitHub API Rate Limit";
+  if (!data) return diagnosticsSummaryUnknownItem(label);
+  const usingLastKnown = !data.fetched && !!data.last_known;
+  const overall = data.fetched ? data.overall : usingLastKnown ? data.last_known.overall : null;
+  if (!overall) {
+    return {
+      label,
+      statusText: "未取得",
+      statusClass: DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS,
+      detail: data.error ? "直近の取得に失敗しました。" : "",
+      stale: false,
+    };
+  }
+  return {
+    label,
+    statusText: overall.status,
+    statusClass: githubOverallClass(overall.status),
+    detail: overall.reason || "",
+    stale: usingLastKnown,
+  };
+}
+
+// DOMに触れない純粋関数。statusの2値だけを日本語ラベルへ写す。
+// 「正常」に相当する値は公式データ側に存在しないため、ここでも作らない。
+function diagnosticsSummaryActionsBillingItem(data) {
+  const label = "GitHub Actions（月間利用枠）";
+  if (!data) return diagnosticsSummaryUnknownItem(label);
+  if (data.error) {
+    return { label, statusText: "取得失敗", statusClass: "github-status-error", detail: "", stale: false };
+  }
+  if (!data.fetched) return diagnosticsSummaryUnknownItem(label);
+  if (data.status === "plan_unknown") {
+    return {
+      label,
+      statusText: "Plan不明",
+      statusClass: githubActionsBillingStatusClass(data.status) || DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS,
+      detail: "月間枠を判定できません。",
+      stale: false,
+    };
+  }
+  if (data.status === "usage_breakdown_inconclusive") {
+    return {
+      label,
+      statusText: "内訳判定不可",
+      statusClass: githubActionsBillingStatusClass(data.status) || DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS,
+      detail: "月間枠は判明していますが、正確な消費量は公式APIから判定できません。",
+      stale: false,
+    };
+  }
+  return diagnosticsSummaryUnknownItem(label);
+}
+
+// DOMに触れない純粋関数。計測中Activity件数は既存レスポンスのactive_sessionsの
+// 長さそのものであり、新しい集計を作っていない。
+function diagnosticsSummaryGraphqlItem(data) {
+  const label = "GraphQL消費診断";
+  if (!data) return diagnosticsSummaryUnknownItem(label);
+  if (data.enabled === false) {
+    return { label, statusText: "無効", statusClass: DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS, detail: "", stale: false };
+  }
+  // enabledがfalseでないだけでは「待機中」と断定できない。sampler_runningが
+  // 欠けているレスポンスを「待機中」と読むと、元データに無い判定になる。
+  if (data.sampler_running === undefined || data.sampler_running === null) {
+    return diagnosticsSummaryUnknownItem(label);
+  }
+  const activeCount = Array.isArray(data.active_sessions) ? data.active_sessions.length : 0;
+  return {
+    label,
+    statusText: data.sampler_running ? "計測中" : "待機中",
+    statusClass: data.sampler_running ? "github-status-normal" : DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS,
+    detail: `計測中のActivity: ${activeCount}件`,
+    stale: false,
+  };
+}
+
+// DOMに触れない純粋関数。last_auto_refresh_error_typeは内部の固定トークンなので、
+// 生の値を画面へ出さず「失敗した」という事実だけを示す。
+function diagnosticsSummaryCodexItem(data) {
+  const label = "Codex 自動取得";
+  if (!data) return diagnosticsSummaryUnknownItem(label);
+  // 「取得できていない」と「無効になっている」を混同しない。refresh失敗時に
+  // 画面へ渡されるのは既存stateへerror_typeだけを足した部分的なオブジェクトで、
+  // auto_refresh_enabledを持たないことがある。それを「無効」と読むと、
+  // 元データに無い判定を作ってしまう。
+  if (data.auto_refresh_enabled === undefined || data.auto_refresh_enabled === null) {
+    return diagnosticsSummaryUnknownItem(label);
+  }
+  if (!data.auto_refresh_enabled) {
+    return { label, statusText: "自動更新 無効", statusClass: DIAGNOSTICS_SUMMARY_UNKNOWN_CLASS, detail: "", stale: false };
+  }
+  if (data.last_auto_refresh_error_type) {
+    return {
+      label,
+      statusText: "直近の自動更新に失敗",
+      statusClass: "github-status-error",
+      detail: "既存のキャッシュ値は保持されています。",
+      stale: false,
+    };
+  }
+  return {
+    label,
+    statusText: "自動更新 有効",
+    statusClass: "github-status-normal",
+    detail: "",
+    stale: !!data.stale,
+  };
+}
+
+function diagnosticsSummaryItems(sources) {
+  const input = sources || {};
+  return [
+    diagnosticsSummaryGithubRateLimitItem(input.githubRateLimit),
+    diagnosticsSummaryActionsBillingItem(input.githubActionsBilling),
+    diagnosticsSummaryGraphqlItem(input.githubGraphqlDiagnostics),
+    diagnosticsSummaryCodexItem(input.codexRateLimits),
+  ];
+}
+
+function diagnosticsSummaryItemHtml(item) {
+  const staleHtml = item.stale ? `<span class="status status-warn">最終取得値</span>` : "";
+  const detailHtml = item.detail ? `<span class="muted diagnostics-summary-detail">${escapeHtml(item.detail)}</span>` : "";
+  return `
+    <div class="diagnostics-summary-row">
+      <span class="diagnostics-summary-label">${escapeHtml(item.label)}</span>
+      <span class="github-resource-status ${item.statusClass}">${escapeHtml(item.statusText)}</span>
+      ${staleHtml}
+      ${detailHtml}
+    </div>`;
+}
+
+function diagnosticsSummaryHtml(items) {
+  const rows = (Array.isArray(items) ? items : []).map(diagnosticsSummaryItemHtml).join("");
+  return `
+    ${rows}
+    <p class="muted">GitHub APIのOverall判定はcoreとgraphqlだけを根拠としています（searchは含みません）。GitHub Actionsには「正常」に相当する状態が公式データ側に存在しないため、表示しません。</p>`;
+}
+
+function renderDiagnosticsSummary() {
+  const target = document.querySelector("#diagnosticsSummary");
+  if (!target) return;
+  target.innerHTML = diagnosticsSummaryHtml(
+    diagnosticsSummaryItems({
+      githubRateLimit: state.githubRateLimit,
+      githubActionsBilling: state.githubActionsBilling,
+      githubGraphqlDiagnostics: state.githubGraphqlDiagnostics,
+      codexRateLimits: state.codexRateLimits,
+    })
+  );
+}
+
+// ============================================================================
+// 分析用データ(Analysis Pack)
+//
+// 画面がすでに取得済みのレスポンスだけを入力にして、手元のAIツールへ貼り付ける
+// ためのテキストを組み立てる。ここから外部への送信は一切行わず、生成時に新しい
+// バックエンド取得も行わない。
+//
+// 出力はallowlist方式: 下のKEYS定数に列挙したフィールドだけを写し、それ以外は
+// 元データに存在しても決して出力しない(github_login / github_user_id / label /
+// repository / pr_number / note / error_message / 生のlimit_id / path / raw payload
+// はいずれも列挙していない)。値がnull/undefinedのフィールドは行ごと省略するため、
+// 常にnullであるbilling派生値(used_included_minutes等)は0として現れることもない。
+// ============================================================================
+
+const ANALYSIS_PACK_PREAMBLE = [
+  "以下はtemporal correlation dataであり、exact consumer attributionではありません。",
+  "GitHub APIはconsumer別のGraphQL消費内訳を返しません。",
+].join("\n");
+
+const ANALYSIS_PACK_ALLOWANCE_BUCKET_KEYS = [
+  "provider",
+  "product_surface",
+  "display_name",
+  "limit_id_origin",
+  "plan_type",
+  "rate_limit_reached_type",
+  "status",
+  "source_kind",
+  "provenance",
+  "observed_at",
+];
+const ANALYSIS_PACK_ALLOWANCE_WINDOW_KEYS = [
+  "source_slot",
+  "window_duration_minutes",
+  "used_percent",
+  "remaining_percent",
+  "resets_at",
+];
+const ANALYSIS_PACK_UNAVAILABLE_KEYS = ["provider", "product_surface", "status", "source_kind"];
+const ANALYSIS_PACK_GITHUB_RESOURCE_KEYS = [
+  "resource",
+  "status",
+  "limit",
+  "used",
+  "remaining",
+  "usage_percent",
+  "remaining_percent",
+  "reset_at_utc",
+  "seconds_until_reset",
+];
+const ANALYSIS_PACK_BILLING_KEYS = [
+  "status",
+  "plan_name",
+  "included_minutes",
+  "discounted_standard_minutes",
+  "billable_standard_minutes",
+  "paid_non_included_minutes",
+  "billing_year",
+  "billing_month",
+  "collected_at",
+  "skipped_unknown_skus",
+];
+const ANALYSIS_PACK_SESSION_KEYS = [
+  "actor_type",
+  "started_at",
+  "ended_at",
+  "status",
+  "stop_reason",
+  "graphql_used_start",
+  "graphql_used_end",
+  "graphql_delta_total",
+  "max_valid_interval_delta",
+];
+const ANALYSIS_PACK_SAMPLE_KEYS = [
+  "collected_at",
+  "graphql_used",
+  "graphql_limit",
+  "graphql_remaining",
+  "graphql_reset_at",
+  "graphql_delta",
+  "fetch_status",
+  "attribution_status",
+];
+
+// DOMに触れない純粋関数: スカラーと文字列配列だけを文字列化する。オブジェクトは
+// 決して展開しない(未知の入れ子が紛れ込んでも中身を出力しないため)。
+function analysisPackFormatValue(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== null && item !== undefined && typeof item !== "object")
+      .map((item) => String(item))
+      .join(", ");
+  }
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return "";
+  return String(value);
+}
+
+// DOMに触れない純粋関数: allowlistのkeyだけを`key: value`行へ写す。
+// null/undefined、および展開できない値は行ごと省略する。
+function analysisPackLines(source, keys, indent) {
+  const prefix = indent || "";
+  if (!source || typeof source !== "object") return [];
+  const lines = [];
+  keys.forEach((key) => {
+    const value = source[key];
+    if (value === null || value === undefined) return;
+    const formatted = analysisPackFormatValue(value);
+    if (formatted === "") return;
+    lines.push(`${prefix}${key}: ${formatted}`);
+  });
+  return lines;
+}
+
+// DOMに触れない純粋関数: Pack内だけで有効な連番の別名を割り当てる。
+// 生の値(label/repository/pr_number)からhashやfingerprintを作らず、配列の
+// 出現順に activity_1, activity_2 ... を振るだけ。Mapはこの関数の戻り値
+// としてのみ存在し、localStorage・DB・DOM属性のいずれにも保存しない。
+// Packを作り直せば番号は変わり得る(安定した識別子ではない)。
+function analysisPackSessionPseudonyms(sessions) {
+  const rows = Array.isArray(sessions) ? sessions : [];
+  const pseudonyms = new Map();
+  rows.forEach((session) => {
+    if (!session || session.id === null || session.id === undefined) return;
+    if (pseudonyms.has(session.id)) return;
+    pseudonyms.set(session.id, `activity_${pseudonyms.size + 1}`);
+  });
+  return pseudonyms;
+}
+
+function analysisPackPseudonymFor(pseudonyms, sessionId) {
+  if (!pseudonyms || typeof pseudonyms.get !== "function") return "activity_unknown";
+  return pseudonyms.get(sessionId) || "activity_unknown";
+}
+
+// DOMに触れない純粋関数: sample配列のcollected_atから観測期間を求める。
+// 読めない日時は範囲判定に使わない(推測しない)。
+function analysisPackSampleTimeRange(samples) {
+  const rows = Array.isArray(samples) ? samples : [];
+  let earliest = null;
+  let latest = null;
+  rows.forEach((sample) => {
+    if (!sample || !sample.collected_at) return;
+    const ms = new Date(sample.collected_at).getTime();
+    if (!Number.isFinite(ms)) return;
+    if (earliest === null || ms < earliest.ms) earliest = { ms, raw: sample.collected_at };
+    if (latest === null || ms > latest.ms) latest = { ms, raw: sample.collected_at };
+  });
+  if (earliest === null || latest === null) return null;
+  return { from: earliest.raw, to: latest.raw };
+}
+
+function analysisPackIsoOrEmpty(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  const ms = date.getTime();
+  if (!Number.isFinite(ms)) return "";
+  return date.toISOString();
+}
+
+// DOMに触れない純粋関数: 取得済みデータからPack本文(プレーンテキスト)を組み立てる。
+// 先頭は必ずANALYSIS_PACK_PREAMBLE。sourcesに無い領域は「未取得」と明記し、
+// 0や空の数値で埋めない。
+function buildAnalysisPack(sources, options) {
+  const input = sources || {};
+  const generatedAt = analysisPackIsoOrEmpty((options && options.now) || new Date());
+  const lines = [ANALYSIS_PACK_PREAMBLE, ""];
+
+  lines.push("## メタ情報");
+  if (generatedAt) lines.push(`generated_at: ${generatedAt}`);
+  const sampleRange = analysisPackSampleTimeRange(input.diagnosticsSamples);
+  if (sampleRange) {
+    lines.push(`sample_time_range_from: ${sampleRange.from}`);
+    lines.push(`sample_time_range_to: ${sampleRange.to}`);
+  }
+  lines.push("");
+
+  lines.push("## 使用枠(Usage Allowance)");
+  const allowancePayload = input.usageAllowances;
+  if (!allowancePayload) {
+    lines.push("未取得");
+  } else {
+    const buckets = Array.isArray(allowancePayload.allowances) ? allowancePayload.allowances : [];
+    const unavailable = Array.isArray(allowancePayload.unavailable) ? allowancePayload.unavailable : [];
+    if (!buckets.length && !unavailable.length) lines.push("データなし");
+    buckets.forEach((bucket, index) => {
+      lines.push(`- bucket_${index + 1}`);
+      analysisPackLines(bucket, ANALYSIS_PACK_ALLOWANCE_BUCKET_KEYS, "  ").forEach((line) => lines.push(line));
+      const windows = Array.isArray(bucket.windows) ? bucket.windows : [];
+      if (!windows.length) {
+        lines.push("  windows: 枠情報なし（0%ではありません）");
+      }
+      windows.forEach((window, windowIndex) => {
+        lines.push(`  - window_${windowIndex + 1}`);
+        analysisPackLines(window, ANALYSIS_PACK_ALLOWANCE_WINDOW_KEYS, "    ").forEach((line) => lines.push(line));
+      });
+    });
+    unavailable.forEach((item, index) => {
+      lines.push(`- unavailable_${index + 1}（取得不能。0%ではありません）`);
+      analysisPackLines(item, ANALYSIS_PACK_UNAVAILABLE_KEYS, "  ").forEach((line) => lines.push(line));
+    });
+  }
+  lines.push("");
+
+  lines.push("## GitHub API Rate Limit");
+  const rateLimit = input.githubRateLimit;
+  if (!rateLimit) {
+    lines.push("未取得");
+  } else {
+    const usingLastKnown = !rateLimit.fetched && !!rateLimit.last_known;
+    const resources = rateLimit.fetched ? rateLimit.resources : usingLastKnown ? rateLimit.last_known.resources : null;
+    const overall = rateLimit.fetched ? rateLimit.overall : usingLastKnown ? rateLimit.last_known.overall : null;
+    if (usingLastKnown) lines.push("補足:直近の取得は失敗しており、以下は最終取得値です。");
+    // seconds_until_resetは取得時点からの相対値なので、基準時刻を必ず添える
+    // (無いとPackのgenerated_at基準だと誤読される)。
+    const collectedAt = rateLimit.fetched
+      ? rateLimit.collected_at
+      : usingLastKnown
+        ? rateLimit.last_known.collected_at
+        : null;
+    if (collectedAt) lines.push(`collected_at: ${analysisPackFormatValue(collectedAt)}`);
+    if (overall) {
+      lines.push(`overall.status: ${analysisPackFormatValue(overall.status)}`);
+      // overallがErrorのとき、backendのdetermine_overall
+      // (app/github_rate_limit.py:216-217)はreasonへresourceのerror_messageを
+      // そのまま入れる。error_messageは許可リストに載せていないフィールドなので、
+      // reason経由でも外へ出さない。取得できていないことはstatusだけで伝わる。
+      if (overall.status === "Error") {
+        lines.push("overall.reason: 取得エラーのため省略");
+      } else {
+        lines.push(`overall.reason: ${analysisPackFormatValue(overall.reason)}`);
+      }
+      lines.push("補足:overallの根拠はcoreとgraphqlのみで、searchは含まれません。");
+    }
+    if (!resources) {
+      lines.push("resources: 未取得");
+    } else {
+      ["core", "graphql", "search"].forEach((name) => {
+        const resource = resources[name];
+        if (!resource) return;
+        lines.push(`- ${name}`);
+        analysisPackLines(resource, ANALYSIS_PACK_GITHUB_RESOURCE_KEYS, "  ").forEach((line) => lines.push(line));
+      });
+      lines.push("補足:seconds_until_resetはcollected_at時点から数えた秒数です（generated_at時点ではありません）。");
+    }
+  }
+  lines.push("");
+
+  lines.push("## GitHub Actions（月間利用枠）");
+  const billing = input.githubActionsBilling;
+  if (!billing) {
+    lines.push("未取得");
+  } else if (billing.error) {
+    lines.push("取得失敗");
+  } else if (!billing.fetched) {
+    lines.push("未取得");
+  } else {
+    analysisPackLines(billing, ANALYSIS_PACK_BILLING_KEYS, "").forEach((line) => lines.push(line));
+    if (billing.stale) {
+      lines.push("補足:この値は再取得間隔を過ぎた最終取得値です（stale）。現在値として扱わないでください。");
+    }
+    lines.push("補足:正確な消費分数・残り分数を示すフィールドは公式APIに存在しないため、この節には含まれません。");
+  }
+  lines.push("");
+
+  lines.push("## GitHub GraphQL Diagnostic Sessions");
+  const sessions = Array.isArray(input.diagnosticsSessions) ? input.diagnosticsSessions : [];
+  const pseudonyms = analysisPackSessionPseudonyms(sessions);
+  // 空配列は「0件」とは限らない。取得済みで空のときだけ「データなし」と書き、
+  // 未取得・取得失敗を0件として見せない。
+  const historyStatus = input.diagnosticsHistoryStatus;
+  const historyEmptyText =
+    historyStatus === "ok"
+      ? "データなし（取得済み・0件）"
+      : historyStatus === "failed"
+        ? "取得失敗（0件ではありません）"
+        : "未取得（0件ではありません）";
+  if (!sessions.length) {
+    lines.push(historyEmptyText);
+  } else {
+    lines.push("補足:ラベル・Repository・PR番号は含めず、このPack内だけで有効な連番へ置き換えています。");
+    lines.push(
+      "補足:graphql_delta_totalはそのActivityの期間全体、max_valid_interval_deltaはその期間中で最大の区間差分で、どちらもアカウント全体のGraphQLカウンタから求めた値です。このActivity自身の消費量ではありません。"
+    );
+    sessions.forEach((session) => {
+      lines.push(`- ${analysisPackPseudonymFor(pseudonyms, session.id)}`);
+      analysisPackLines(session, ANALYSIS_PACK_SESSION_KEYS, "  ").forEach((line) => lines.push(line));
+    });
+  }
+  lines.push("");
+
+  lines.push("## Sample Timeline");
+  const samples = Array.isArray(input.diagnosticsSamples) ? input.diagnosticsSamples : [];
+  if (!samples.length) {
+    lines.push(historyEmptyText);
+  } else {
+    samples.forEach((sample, index) => {
+      lines.push(`- sample_${index + 1}`);
+      analysisPackLines(sample, ANALYSIS_PACK_SAMPLE_KEYS, "  ").forEach((line) => lines.push(line));
+      const activeSessions = githubGraphqlDiagnosticsActiveSessionsAtSample(sample, sessions);
+      const activeNames = activeSessions.map((session) => analysisPackPseudonymFor(pseudonyms, session.id));
+      // sessionsは件数上限のある取得済み一覧だけなので、該当が無くても
+      // 「どのActivityも動いていなかった」とは断定しない。
+      lines.push(
+        `  active_activities: ${activeNames.length ? activeNames.join(", ") : "取得済みsession一覧内に該当なし"}`
+      );
+    });
+  }
+  lines.push("");
+
+  lines.push("## 読み方の注意");
+  lines.push("- 同時刻に複数のActivityが動いていた場合、差分をActivity間で按分することはできません。");
+  lines.push("- 時間帯が重なるActivityのgraphql_delta_totalは同じ観測を重複して含み得ます。合算しないでください。");
+  lines.push("- 取得不能(unavailable)と使用率0%は別の状態です。取得不能を0%として扱わないでください。");
+  lines.push("- 未取得・取得失敗と0件は別の状態です。未取得・取得失敗を0件として扱わないでください。");
+  lines.push("- reset境界やカウンタ減少を検出した区間では、差分そのものが判定不可です。");
+
+  return lines.join("\n");
+}
+
+function analysisPackSourcesFromState() {
+  return {
+    usageAllowances: state.usageAllowances,
+    githubRateLimit: state.githubRateLimit,
+    githubActionsBilling: state.githubActionsBilling,
+    diagnosticsSessions: state.diagnosticsSessions,
+    diagnosticsSamples: state.diagnosticsSamples,
+    diagnosticsHistoryStatus: state.diagnosticsHistoryStatus,
+  };
+}
+
+const ANALYSIS_PACK_EMPTY_MESSAGE = "先に「Analysis Packを生成」を押してください。";
+const ANALYSIS_PACK_COPY_SUCCESS_MESSAGE = "クリップボードへコピーしました。";
+const ANALYSIS_PACK_COPY_UNAVAILABLE_MESSAGE =
+  "この環境ではコピー機能を利用できません。テキスト欄を選択して手動でコピーしてください。";
+const ANALYSIS_PACK_COPY_FAILED_MESSAGE =
+  "コピーできませんでした。テキスト欄を選択して手動でコピーしてください。";
+
+// clipboardが無い/拒否された場合でも例外を投げず、textareaによる手動コピーへ
+// 案内するだけにする。失敗理由(例外オブジェクト)は一切読まず、画面へも出さない。
+async function copyAnalysisPackText(text, clipboard) {
+  if (!text) return { ok: false, message: ANALYSIS_PACK_EMPTY_MESSAGE };
+  if (!clipboard || typeof clipboard.writeText !== "function") {
+    return { ok: false, message: ANALYSIS_PACK_COPY_UNAVAILABLE_MESSAGE };
+  }
+  try {
+    await clipboard.writeText(text);
+    return { ok: true, message: ANALYSIS_PACK_COPY_SUCCESS_MESSAGE };
+  } catch (error) {
+    return { ok: false, message: ANALYSIS_PACK_COPY_FAILED_MESSAGE };
+  }
+}
+
+function setAnalysisPackStatus(message) {
+  const statusEl = document.querySelector("#analysisPackStatus");
+  if (statusEl) statusEl.textContent = message || "";
+}
+
+// 生成しただけでは自動コピーしない(ユーザーが内容を確認してからCopyを押す)。
+function generateAnalysisPack() {
+  const output = document.querySelector("#analysisPackOutput");
+  const text = buildAnalysisPack(analysisPackSourcesFromState(), {});
+  state.analysisPackText = text;
+  if (output) output.value = text;
+  setAnalysisPackStatus("生成しました。内容を確認してからコピーしてください。");
+  return text;
 }
 
 function applyFiltersAndSort(rows) {
@@ -1630,6 +2231,7 @@ function renderCodexRateLimits(data) {
     </div>
     ${errorHtml}
   `;
+  renderDiagnosticsSummary();
 }
 
 function renderDashboard() {
@@ -1772,28 +2374,77 @@ function renderAlerts(rows) {
       .join("") || `<div class="muted">現在のアラートはありません。</div>`;
 }
 
-function filteredHistoryRows() {
-  const mode = document.querySelector("#historyFilter").value;
-  if (mode === "manual") return state.history.filter((row) => row.source_type === "manual");
-  if (mode === "adjust") return state.history.filter(isAdjustmentRecord);
-  if (mode === "openai") return state.history.filter((row) => row.source_type === "api_openai_management");
-  if (mode === "gemini") return state.history.filter((row) => row.source_type === "api_gemini_management");
-  if (mode === "claude") return state.history.filter((row) => row.source_type === "api_claude_management");
-  if (mode === "api") return state.history.filter((row) => isApiSource(row.source_type));
-  return state.history;
+const HISTORY_PAGE_SIZE = 30;
+
+// DOMに触れない純粋関数: 期間指定の下限(ミリ秒)。"all"は絞り込みなしを表すnull。
+// "today"はローカル日付の0時起点。
+function historyPeriodStartMs(period, nowMs) {
+  if (period === "today") {
+    const start = new Date(nowMs);
+    start.setHours(0, 0, 0, 0);
+    return start.getTime();
+  }
+  if (period === "7d") return nowMs - 7 * 24 * 60 * 60 * 1000;
+  if (period === "30d") return nowMs - 30 * 24 * 60 * 60 * 1000;
+  return null;
 }
 
-function renderHistory() {
-  const rows = filteredHistoryRows();
-  document.querySelector("#history").innerHTML =
-    rows
-      .slice(0, 30)
-      .map((r) => {
-        const adjustment = isAdjustmentRecord(r);
-        const value = Number(r.used_value);
-        const sign = value > 0 ? "+" : "";
-        const valueClass = adjustment && value < 0 ? "history-value-negative" : adjustment ? "history-value-adjust" : "";
-        return `
+// DOMに触れない純粋関数: すでに取得済みの配列だけを絞り込む(サーバーへの追加
+// リクエストは発生しない)。日時として読めない行は、期間指定中は範囲内だと
+// 断定できないため除外する。
+function historyRowsWithinPeriod(rows, period, nowMs) {
+  const source = Array.isArray(rows) ? rows : [];
+  const startMs = historyPeriodStartMs(period, nowMs);
+  if (startMs === null) return source;
+  return source.filter((row) => {
+    const ms = new Date(row.recorded_at).getTime();
+    if (!Number.isFinite(ms)) return false;
+    return ms >= startMs;
+  });
+}
+
+// DOMに触れない純粋関数: 取得元による絞り込み。
+function historySourceFilteredRows(rows, mode) {
+  const source = Array.isArray(rows) ? rows : [];
+  if (mode === "manual") return source.filter((row) => row.source_type === "manual");
+  if (mode === "adjust") return source.filter(isAdjustmentRecord);
+  if (mode === "openai") return source.filter((row) => row.source_type === "api_openai_management");
+  if (mode === "gemini") return source.filter((row) => row.source_type === "api_gemini_management");
+  if (mode === "claude") return source.filter((row) => row.source_type === "api_claude_management");
+  if (mode === "api") return source.filter((row) => isApiSource(row.source_type));
+  return source;
+}
+
+// DOMに触れない純粋関数: 行の日時が何を指しているかでラベルを分ける。
+//
+// 手入力・補正は常に新しい行として追記され、その時刻は記録された時刻そのもの
+// (app/crud.py::add_usage)。一方API由来の行のrecorded_atは、行が書かれた時刻
+// ではなく取り込んだ利用期間の終わり(period_end)であり
+// (app/collectors/importer.py:272-280)、既存行を更新するときも同じ値が
+// 書き戻される(同:339)。usage_recordsには行自体の更新時刻を持つ列が無いため、
+// これを「最終更新」と呼ぶとデータに存在しない意味を主張することになる。
+function historyRecordedAtLabel(sourceType) {
+  return isApiSource(sourceType) ? "対象期間の終了" : "記録";
+}
+
+function filteredHistoryRows() {
+  const modeEl = document.querySelector("#historyFilter");
+  const periodEl = document.querySelector("#historyPeriod");
+  const mode = modeEl ? modeEl.value : "all";
+  const period = periodEl ? periodEl.value : "all";
+  return historyRowsWithinPeriod(historySourceFilteredRows(state.history, mode), period, Date.now());
+}
+
+function resetHistoryPaging() {
+  state.historyVisibleCount = HISTORY_PAGE_SIZE;
+}
+
+function historyRowHtml(r) {
+  const adjustment = isAdjustmentRecord(r);
+  const value = Number(r.used_value);
+  const sign = value > 0 ? "+" : "";
+  const valueClass = adjustment && value < 0 ? "history-value-negative" : adjustment ? "history-value-adjust" : "";
+  return `
           <div class="row history-row ${adjustment ? "history-adjustment" : ""} ${isApiSource(r.source_type) ? "history-api" : ""}">
             <div class="history-title">
               <strong>${escapeHtml(r.service_name)} / ${escapeHtml(r.model_name)} / ${escapeHtml(r.limit_type)}</strong>
@@ -1801,12 +2452,29 @@ function renderHistory() {
             </div>
             <div class="history-amount ${valueClass}">${sign}${fmtNumber(value)} ${escapeHtml(r.unit)}</div>
             <div class="history-source">取得元: <span class="source-badge ${sourceTypeClass(r.source_type)}">${escapeHtml(sourceTypeLabel(r.source_type))}</span></div>
-            <div class="muted">recorded_at: ${fmtDate(r.recorded_at)}</div>
+            <div class="muted">${escapeHtml(historyRecordedAtLabel(r.source_type))}: ${fmtDate(r.recorded_at)}</div>
             <div>${escapeHtml(r.note ?? "")}</div>
           </div>
         `;
-      })
-      .join("") || `<div class="muted">使用履歴はありません。</div>`;
+}
+
+function renderHistory() {
+  const rows = filteredHistoryRows();
+  const visibleCount = Math.max(Number(state.historyVisibleCount) || 0, HISTORY_PAGE_SIZE);
+  const visible = rows.slice(0, visibleCount);
+
+  const target = document.querySelector("#history");
+  if (target) {
+    target.innerHTML = visible.map(historyRowHtml).join("") || `<div class="muted">使用履歴はありません。</div>`;
+  }
+  const countEl = document.querySelector("#historyCount");
+  if (countEl) {
+    countEl.textContent = rows.length ? `${rows.length}件中 ${visible.length}件を表示` : "";
+  }
+  const moreButton = document.querySelector("#historyMore");
+  if (moreButton) {
+    moreButton.hidden = visible.length >= rows.length;
+  }
 }
 
 function renderCollectorRuns() {
@@ -2320,7 +2988,43 @@ function initApp() {
   }
 
   document.querySelector("#usageMode").addEventListener("change", updateUsageModeUi);
-  document.querySelector("#historyFilter").addEventListener("change", renderHistory);
+
+  // 取得元・期間のどちらを変えても、絞り込みは取得済み配列に対して行うだけで、
+  // 新しいサーバー取得は発生しない。表示件数は先頭ページへ戻す。
+  for (const id of ["historyFilter", "historyPeriod"]) {
+    const element = document.querySelector(`#${id}`);
+    if (!element) continue;
+    element.addEventListener("change", () => {
+      resetHistoryPaging();
+      renderHistory();
+    });
+  }
+
+  const historyMoreButton = document.querySelector("#historyMore");
+  if (historyMoreButton) {
+    historyMoreButton.addEventListener("click", () => {
+      state.historyVisibleCount =
+        Math.max(Number(state.historyVisibleCount) || 0, HISTORY_PAGE_SIZE) + HISTORY_PAGE_SIZE;
+      renderHistory();
+    });
+  }
+
+  const analysisPackGenerateButton = document.querySelector("#analysisPackGenerate");
+  if (analysisPackGenerateButton) {
+    analysisPackGenerateButton.addEventListener("click", () => {
+      generateAnalysisPack();
+    });
+  }
+
+  // 生成とコピーは別操作にする(生成しただけで自動コピーはしない)。
+  const analysisPackCopyButton = document.querySelector("#analysisPackCopy");
+  if (analysisPackCopyButton) {
+    analysisPackCopyButton.addEventListener("click", async () => {
+      const clipboard = typeof navigator !== "undefined" ? navigator.clipboard : null;
+      const result = await copyAnalysisPackText(state.analysisPackText, clipboard);
+      setAnalysisPackStatus(result.message);
+    });
+  }
 
   document.querySelector("#exportJson").addEventListener("click", () => {
     window.location.href = "/api/export/json";
@@ -2341,16 +3045,7 @@ function initApp() {
   // メインダッシュボード(#cards)のloadAll()とは独立した読み込みサイクル。
   // ここが失敗してもメインダッシュボードは壊さず、Recent Activity Sessions /
   // Sample Timelineの領域内だけに固定メッセージを出す。
-  refreshGithubGraphqlDiagnosticsSessions().catch(() => {
-    const sessionsTarget = document.querySelector("#githubGraphqlDiagnosticsSessionsResult");
-    if (sessionsTarget) {
-      sessionsTarget.innerHTML = `<p class="muted">履歴の取得に失敗しました。</p>`;
-    }
-    const timelineTarget = document.querySelector("#githubGraphqlDiagnosticsTimelineResult");
-    if (timelineTarget) {
-      timelineTarget.innerHTML = `<p class="muted">サンプルの取得に失敗しました。</p>`;
-    }
-  });
+  refreshGithubGraphqlDiagnosticsSessions().catch(markGithubGraphqlDiagnosticsHistoryFailed);
 }
 
 if (typeof document !== "undefined") {
@@ -2420,5 +3115,31 @@ if (typeof module !== "undefined") {
     renderOverviewView,
     normalizeAppView,
     setActiveView,
+    githubGraphqlDiagnosticsFetchStatusLabel,
+    diagnosticsSummaryGithubRateLimitItem,
+    diagnosticsSummaryActionsBillingItem,
+    diagnosticsSummaryGraphqlItem,
+    diagnosticsSummaryCodexItem,
+    diagnosticsSummaryItems,
+    diagnosticsSummaryItemHtml,
+    diagnosticsSummaryHtml,
+    renderDiagnosticsSummary,
+    ANALYSIS_PACK_PREAMBLE,
+    analysisPackFormatValue,
+    analysisPackLines,
+    analysisPackSessionPseudonyms,
+    analysisPackPseudonymFor,
+    analysisPackSampleTimeRange,
+    buildAnalysisPack,
+    copyAnalysisPackText,
+    generateAnalysisPack,
+    analysisPackSourcesFromState,
+    renderGithubGraphqlDiagnosticsSessions,
+    markGithubGraphqlDiagnosticsHistoryFailed,
+    historyPeriodStartMs,
+    historyRowsWithinPeriod,
+    historySourceFilteredRows,
+    historyRecordedAtLabel,
+    renderHistory,
   };
 }
